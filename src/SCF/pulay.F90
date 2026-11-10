@@ -21,7 +21,7 @@
       integer  :: n
       integer , intent(inout) :: lfock
       integer , intent(inout) :: nfock
-      integer , intent(in) :: msize
+      integer(8) , intent(in) :: msize
       double precision , intent(out) :: pl
       logical , intent(inout) :: start
       double precision  :: f(mpack)
@@ -30,7 +30,9 @@
       double precision , intent(inout) :: fock(*)
       double precision , intent(inout) :: emat(npulay+1,npulay+1)
 !
-      integer :: icalcn, maxlim, linear, mfock, lbase, i, nfock1, j, l, il, ii
+      integer :: icalcn, maxlim, mfock, i, nfock1, j, l, il
+!     64-bit: offsets into the npulay*mpack history arrays exceed 2**31 above N_AO ~ 20,700
+      integer(8) :: linear, lbase, ii
       double precision, dimension((npulay+1)**2) :: evec
       double precision, dimension(npulay) :: coeffs
       double precision :: const, d, sum
@@ -69,9 +71,8 @@
         debug = index(keywrd,'DEBUGPULAY') /= 0
       end if
       if (start) then
-        linear = (n*(n + 1))/2
-        mfock = msize/linear
-        mfock = min0(maxlim,mfock)
+        linear = (int(n,8)*(n + 1))/2
+        mfock = int(min(int(maxlim,8), msize/linear))
         if (debug) write (iw, '('' MAXIMUM SIZE:'',I5)') mfock
         nfock = 1
         lfock = 1
@@ -105,7 +106,7 @@
       do i = 1, nfock
         emat(nfock1,i) = -1.D0
         emat(i,nfock1) = -1.D0
-        emat(lfock,i) = ddot(linear,fppf((i-1)*linear+1),1,fppf(lbase+1),1)
+        emat(lfock,i) = ddot(int(linear),fppf((i-1)*linear+1),1,fppf(lbase+1),1)
         emat(i,lfock) = emat(lfock,i)
       end do
       pl = emat(lfock,lfock)/linear
@@ -156,7 +157,7 @@
       do i = 1, linear
         sum = 0.D0
         l = 0
-        ii = (i - 1)*mfock
+        ii = (int(i,8) - 1)*mfock
         do j = 1, nfock
           sum = sum + coeffs(j)*fock(j+ii)
         end do

@@ -144,7 +144,7 @@
           if (allocated(eigb))     deallocate(eigb)
           allocate(h(mpack), p(mpack), pa(mpack), pb(mpack), stat=i)
           j = j + i
-          allocate(pold(npulay*mpack),  pold2(npulay*mpack), f(mpack), stat=i)
+          allocate(pold(int(npulay,8)*mpack),  pold2(int(npulay,8)*mpack), f(mpack), stat=i)
           j = j + i
           allocate(c(norbs, norbs), eigs(norbs + 1), q(numat), stat=i)
           j = j + i
@@ -156,8 +156,8 @@
           j = j + i
           allocate(dxyz(3*numat*l123), stat=i)
           j = j + i
-          if (uhf) allocate(fb(mpack), cb(norbs, norbs), pbold(npulay*mpack), &
-          pbold2(npulay*mpack), pbold3(max(mpack, npulay*npulay)), stat=i)
+          if (uhf) allocate(fb(mpack), cb(norbs, norbs), pbold(int(npulay,8)*mpack), &
+          pbold2(int(npulay,8)*mpack), pbold3(max(mpack, npulay*npulay)), stat=i)
           j = j + i
           if (j /= 0) then
             call mopend("A problem occurred during memory assignment, most likely the system is too big to run. ")

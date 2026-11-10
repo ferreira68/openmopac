@@ -836,11 +836,11 @@
 #ifdef GPU
               if (lgpu) then
                  call pulay_for_gpu (f, pa, norbs, pold, pold2, pold3, &
-                 & jalp, ialp, npulay*mpack, frst, pl)
+                 & jalp, ialp, int(npulay,8)*mpack, frst, pl)
               else
 #endif
                  call pulay (f, pa, norbs, pold, pold2, pold3, &
-                 & jalp, ialp, npulay*mpack, frst, pl)
+                 & jalp, ialp, int(npulay,8)*mpack, frst, pl)
 #ifdef GPU
               end if
 #endif
@@ -957,11 +957,11 @@
 #ifdef GPU
               if (lgpu) then
                  call pulay_for_gpu (fb, pb, norbs, pbold, pbold2, pbold3, &
-                 & jbet, ibet, npulay*mpack, bfrst, plb)
+                 & jbet, ibet, int(npulay,8)*mpack, bfrst, plb)
               else
 #endif
                 call pulay (fb, pb, norbs, pbold, pbold2, pbold3, &
-                 & jbet, ibet, npulay*mpack, bfrst, plb)
+                 & jbet, ibet, int(npulay,8)*mpack, bfrst, plb)
 #ifdef GPU
               end if
 #endif
