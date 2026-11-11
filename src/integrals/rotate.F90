@@ -41,6 +41,8 @@
   double precision ::  rijx, rij
   double precision, dimension(3) :: x
   double precision, dimension(171) :: en
+! Per-pair rotation matrices and core terms, set by rotatd and read by elenuc (formerly module globals).
+  double precision :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5), cored(10,2)
 !-----------------------------------------------
 !***********************************************************************
 !
@@ -102,9 +104,9 @@
 !
   li = natorb(ni)
   lj = natorb(nj)
-  call rotatd(ni, nj, xi, xj, w, kr, enuc)
+  call rotatd(ni, nj, xi, xj, w, kr, enuc, sp, pp, sd, dp, d_d, cored)
   en(:) = 0.d0
-  call elenuc (1, li, li + 1, li + lj, en)
+  call elenuc (1, li, li + 1, li + lj, en, sp, sd, pp, dp, d_d, cored)
   ik = 0
   do i = 1, li
     do k = 1, i

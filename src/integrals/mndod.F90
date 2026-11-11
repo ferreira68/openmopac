@@ -1093,14 +1093,14 @@
       end function rijkl
 
 
-      subroutine rotatd(ni, nj, ci, cj, w, kr, enuc)
+      subroutine rotatd(ni, nj, ci, cj, w, kr, enuc, sp, pp, sd, dp, d_d, cored)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use funcon_C, only : a0, ev
-      use mndod_C, only : indx, indexd, sp, sd, pp, dp, d_d, cored, inddd
+      use mndod_C, only : indx, indexd, inddd
       use parameters_C, only : natorb, iod, tore
-      use molkst_C, only : numcal, l_feather, method_PM7
+      use molkst_C, only : l_feather, method_PM7
 !     *
 !     CALCULATION OF TWO-CENTER TWO-ELECTRON INTEGRALS
 !     IN THE MOLECULAR COODINATE SYSTEM BY 2.d0-STEP PROCEDURE
@@ -1123,12 +1123,16 @@
       double precision, dimension(*)  :: w
       double precision  :: enuc
       double precision, dimension(171) :: en
+! Per-pair scratch owned by the caller (rotate), formerly module globals in mndod_C, so that atom
+! pairs can be evaluated independently (threads, GPU).
+      double precision, intent(inout) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
+      double precision, intent(inout) :: cored(10,2)
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
       integer , dimension(45) :: met
       integer :: limkl, kl, ii, kk, limij, istep, i, i1, j1, ij, jj, mm, k, l, &
-        iw, iminus, j, ij1, jw, icalcn = 0, li, lj
+        iw, iminus, j, ij1, jw, li, lj
       double precision, dimension(45,45) :: v
       double precision, dimension(22) :: ri
       double precision, dimension(491) :: rep
@@ -1140,11 +1144,8 @@
       data met/ 1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, &
         4, 5, 5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 5*6/
 !
-      if (icalcn /= numcal) then
-        icalcn = numcal
-      end if
 !
-      call rotmat (nj, ni, ci, cj, r)
+      call rotmat (nj, ni, ci, cj, r, sp, pp, sd, dp, d_d)
 !
       call reppd (ni, nj, r, ri, gab) ! Work out the 22 s-p terms
       rij = r
@@ -1190,7 +1191,7 @@
         istep = limkl*limij
         ww(:istep) = 0.0D0
   !
-        call tx (ii, kk, rep, logv, v)
+        call tx (ii, kk, rep, logv, v, sp, sd, pp, dp, d_d)
   !
         do i1 = 1, ii
           do j1 = 1, i1
@@ -1363,7 +1364,7 @@
       en(:) = 0.d0
       li = natorb(ni)
       lj = natorb(nj)
-      call elenuc (1, li, li + 1, li + lj, en)
+      call elenuc (1, li, li + 1, li + lj, en, sp, sd, pp, dp, d_d, cored)
 ! *** CORE-CORE REPULSIONS FOR MNDO.
       call ccrep (ni, nj, r, enuc, gab)
       return
@@ -1379,12 +1380,11 @@
       end subroutine rotatd
 
 
-      subroutine rotmat(nj, ni, coordi, coordj, r)
+      subroutine rotmat(nj, ni, coordi, coordj, r, sp, pp, sd, dp, d_d)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use parameters_C, only : dorbs
-      use mndod_C, only : sp, pp, sd, dp, d_d
 !     *
 !     ROTATION MATRIX FOR A GIVEN ATOM PAIR I-J (I.GT.J).
 !     *
@@ -1397,6 +1397,7 @@
       double precision , intent(out) :: r
       double precision , intent(in) :: coordi(3)
       double precision , intent(in) :: coordj(3)
+      double precision, intent(inout) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
 !-----------------------------------------------
 !   L o c a l   P a r a m e t e r s
 !-----------------------------------------------
@@ -1867,11 +1868,11 @@
       end subroutine eiscor
 
 
-      subroutine tx(ii, kk, rep, logv, v)
+      subroutine tx(ii, kk, rep, logv, v, sp, sd, pp, dp, d_d)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
-      use mndod_C, only : indexd, indx, ind2, sp, sd, pp, dp, d_d
+      use mndod_C, only : indexd, indx, ind2
 !     *
 !     ROTATION OF TWO-ELECTRON TWO-CENTER INTEGRALS IN SPD BASIS
 !     FIRST STEP
@@ -1885,6 +1886,7 @@
       double precision , intent(in) :: rep(491)
       double precision , intent(out) :: v(45,45)
       logical , intent(out) :: logv(45,45)
+      double precision, intent(in) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
@@ -2364,12 +2366,12 @@ end subroutine wstore
 
 
 
-      subroutine elenuc(ia, ib, ja, jb, h)
+      subroutine elenuc(ia, ib, ja, jb, h, sp, sd, pp, dp, d_d, cored)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use molkst_C, only : mpack
-      use mndod_C, only : sp, sd, pp, dp, d_d, cored, inddd, inddp, indpp
+      use mndod_C, only : inddd, inddp, indpp
 !***********************************************************************
 !
 !   ELENUC - Nuclear stabilization terms added to one-electron matrix
@@ -2383,7 +2385,9 @@ end subroutine wstore
       integer , intent(in) :: ib
       integer , intent(in) :: ja
       integer , intent(in) :: jb
-      double precision , intent(inout) :: h(mpack)
+      double precision , intent(inout) :: h(*)   ! en(171) from rotate/rotatd
+      double precision, intent(in) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
+      double precision, intent(in) :: cored(10,2)
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
