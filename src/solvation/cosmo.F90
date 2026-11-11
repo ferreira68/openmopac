@@ -549,6 +549,8 @@ subroutine coscav
    ! Allocate AMAT (packed nps*(nps+1)/2) and BMAT(lm61, nps) from the actual segment
    ! count; reallocate only when a later geometry produces more segments.
     if (.not. mozyme) then
+      write(iw, '(/10x, a, i0, a, i0, a)') "NUMBER OF COSMO SEGMENTS (NPS) = ", nps, &
+        "  (worst-case LENABC = ", lenabc, ")"
       if (nps > 65535) then
         write(iw, '(/10x, a, i0, a)') "COSMO surface has ", nps, " segments; the packed Cholesky"
         write(iw, '(10x, a)') "(DPPTRF, 32-bit indices) is limited to 65535. Use MOZYME or a smaller NSPA."
