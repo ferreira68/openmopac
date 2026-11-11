@@ -29,7 +29,7 @@ submodule (mopac_api:mopac_api_operations) mopac_api_initialize
     breaks, chains, cell_ijk, nw, nfirst, nlast
   use cosmo_C, only : iseps, & ! flag for use of COSMO model
     noeps, useps, lpka, solv_energy, area, fepsi, ediel, nspa
-  use funcon_C, only : fpc, fpc_9 ! fundamental constants used in the MOPAC calculation
+  use funcon_C, only : fpc, fpc_9, a0, ev ! fundamental constants used in the MOPAC calculation
   use maps_C, only : latom, lparam, lpara1, latom1, lpara2, latom2, rxn_coord
   use meci_C, only : nmos, lab
   use molkst_C, only : use_disk, & ! variable to turn off disk usage for MOPAC API
@@ -126,6 +126,8 @@ contains
     trunc_2 = 0.22d0
     ! initialize CODATA fundamental constants
     fpc(:) = fpcref(1,:)
+    a0 = fpc(3)   ! not equivalenced into fpc (see funcon_C)
+    ev = fpc(4)
     ! assemble virtual keyword line
     keywrd = trim(keywrd) // " LET NOSYM GEO-OK"
     write(num2str,'(i6)') system%charge

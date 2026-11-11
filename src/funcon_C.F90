@@ -28,7 +28,11 @@
       double precision, dimension (10) :: fpc = 0.d0
       double precision, parameter :: pi = 3.14159265358979323846d0
       double precision, parameter :: twopi = 2.0d0 * pi
-      equivalence (fpc(1), fpc_1), (fpc(2), fpc_2), (fpc(3), a0), (fpc(4), ev), &
+! a0 and ev are not equivalenced into fpc: device copies (OpenACC declare) cannot alias another
+! variable. They are set from fpc(3) and fpc(4) wherever fpc is assigned (readmo, mopac_api_initialize).
+      equivalence (fpc(1), fpc_1), (fpc(2), fpc_2), &
       & (fpc(5), fpc_5), (fpc(6), fpc_6), (fpc(7), fpc_7), (fpc(8), fpc_8), &
       & (fpc(9), fpc_9), (fpc(10), fpc_10)
+! Device copies for the OpenACC NDDO pair-integral routines (ignored without OpenACC).
+!$acc declare create(a0, ev)
       end module funcon_C

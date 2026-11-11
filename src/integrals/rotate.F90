@@ -21,6 +21,10 @@
   use parameters_C, only: natorb
 !***********************************************************************
 !
+
+  !$acc routine seq
+  !$acc routine(rotatd) seq
+  !$acc routine(elenuc) seq
   implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -121,6 +125,9 @@
       e2a(ik) = en((i*(i - 1))/2 + k)
     end do
   end do
+#ifndef _OPENACC
   if (id == 3 .and. .not. method_PM7) call nddo_to_point(w, e1b, e2a, enuc, rij, ni, nj) ! In solids, transition to point-charge as Rij increases
+#endif
+! OpenACC builds: periodic solids (id == 3) are not supported here yet; nddo_to_point and point are host-only.
   return
   end subroutine rotate

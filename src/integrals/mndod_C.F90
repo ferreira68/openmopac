@@ -81,4 +81,6 @@
         47, 27, 34, 33, 3, 46, 34, 27, 33, 35, 35, 35, 52, 11, 32, 50, 37, 44, &
         14, 39, 22, 48, 11, 32, 49, 37, 44, 1, 6, 6, 7, 51, 38, 22, 31, 38, 29&
         /
+! Device copies for the OpenACC NDDO pair-integral routines (ignored without OpenACC).
+!$acc declare create(ch, ind2, inddd, inddp, indexd, indpp, indx, isym)
       end module mndod_C

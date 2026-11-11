@@ -22,6 +22,7 @@
       use funcon_C, only : a0
       use molkst_C, only : method_mndod, method_pm6, method_am1, &
         method_pm7, method_pm8, method_pm6_org
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -272,6 +273,7 @@
     par16, par17, par18, par19, par20, par21, par22, par23, par24, par25, par26, par27, par28, &
     par29, par30, par31, par32, par33, par34, par35, par36, par37, par38, par39, par40, par41, par42, par43, &
     par44, par45, par46
+  !$acc routine seq
   implicit none
   integer, intent (in) :: ni, nj
   double precision, intent (in) :: r, fff, abond

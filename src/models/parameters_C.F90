@@ -418,4 +418,10 @@ data npq(1:107,3) / &
     data partyp (70)                           / "FG22 "/
     data partyp (71)                           / "FG23 "/
     data partyp (72)                           / "FG24 "/
+! Device copies for the OpenACC NDDO pair-integral routines (ignored without OpenACC).
+!$acc declare create(ad, alp, alpb, am, aq, dd, ddp, dorbs, guess1, guess2, guess3, iod, natorb, po, qq, &
+!$acc& tore, xfac, par1, par2, par3, par4, par5, par6, par7, par8, par9, par10, par11, par12, par13, par14, &
+!$acc& par15, par16, par17, par18, par19, par20, par21, par22, par23, par24, par25, par26, par27, par28, &
+!$acc& par29, par30, par31, par32, par33, par34, par35, par36, par37, par38, par39, par40, par41, par42, &
+!$acc& par43, par44, par45, par46)
       end module parameters_C

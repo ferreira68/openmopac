@@ -48,7 +48,7 @@
 !
       use MOZYME_C, only : start_res, lstart_res, start_letter
 !
-      USE funcon_C, only : fpc
+      USE funcon_C, only : fpc, a0, ev
       use conref_C, only : fpcref
 !
 !***********************************************************************
@@ -419,6 +419,8 @@
 !
         fpc(:) = fpcref(1,:)
       end if
+      a0 = fpc(3)   ! not equivalenced into fpc (see funcon_C)
+      ev = fpc(4)
       latom  = 0
       lparam = 0
       xyz    = index(keywrd,' XYZ') + index(keywrd,' IRC') + index(keywrd,' DRC') /= 0

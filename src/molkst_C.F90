@@ -365,4 +365,7 @@ module molkst_C
     & (methods(13),  method_PM6_D3_not_H4), (methods(14), method_PM7), (methods(15),  method_pm7_ts), &
     & (methods(16),  method_PM7_HH), (methods(17),  method_PM7_minus), (methods(18),  method_pm6_org), &
     & (methods(19),  method_PM8), (methods(20), method_indo)
+! Device copies for the OpenACC NDDO pair-integral routines (ignored without OpenACC).
+!$acc declare create(id, l_feather, method_am1, method_mndod, method_pm6, method_pm6_org, method_pm7, &
+!$acc& method_pm8, mpack, trunc_1, trunc_2)
 end module molkst_C

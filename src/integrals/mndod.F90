@@ -462,6 +462,7 @@
 !
 !***********************************************************************
 !***********************************************************************
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -856,6 +857,7 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1008,6 +1010,7 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1111,6 +1114,8 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      !$acc routine seq
+      !$acc routine(ccrep) seq
       implicit none
       integer, intent(in) :: ni, nj
 !-----------------------------------------------
@@ -1211,35 +1216,35 @@
   !
                 select case (mm)
                 case (1)
-                  iw = indw(1,1)
+                  iw = ((indx(1,1)-1)*limkl + kl)
                   ww(iw) = wrepp
                 case (2)
                   do i = 1, 3
-                    iw = indw(i + 1,1)
+                    iw = ((indx(i + 1,1)-1)*limkl + kl)
                     ww(iw) = ww(iw) + sp(i1-1,i)*wrepp
                   end do
                 case (3)
                   do i = 1, 3
                     cc = pp(i,i1-1,j1-1)
-                    iw = indw(i + 1,i + 1)
+                    iw = ((indx(i + 1,i + 1)-1)*limkl + kl)
                     ww(iw) = ww(iw) + cc*wrepp
                     iminus = i - 1
                     if (iminus == 0) cycle
                     do j = 1, iminus
                       cc = pp(1+i+j,i1-1,j1-1)
-                      iw = indw(i + 1,j + 1)
+                      iw = ((indx(i + 1,j + 1)-1)*limkl + kl)
                       ww(iw) = ww(iw) + cc*wrepp
                     end do
                   end do
                 case (4)
                   do i = 1, 5
-                    iw = indw(i + 4,1)
+                    iw = ((indx(i + 4,1)-1)*limkl + kl)
                     ww(iw) = ww(iw) + sd(i1-4,i)*wrepp
                   end do
                 case (5)
                   do i = 1, 5
                     do j = 1, 3
-                      iw = indw(i + 4,j + 1)
+                      iw = ((indx(i + 4,j + 1)-1)*limkl + kl)
                       ij1 = 3*(i - 1) + j
                       ww(iw) = ww(iw) + dp(ij1,i1-4,j1-1)*wrepp
                     end do
@@ -1247,14 +1252,14 @@
                 case (6)
                   do i = 1, 5
                     cc = d_d(i,i1-4,j1-4)
-                    iw = indw(i + 4,i + 4)
+                    iw = ((indx(i + 4,i + 4)-1)*limkl + kl)
                     ww(iw) = ww(iw) + cc*wrepp
                     iminus = i - 1
                     if (iminus == 0) cycle
                     do j = 1, iminus
                       ij1 = inddd(i,j)
                       cc = d_d(ij1,i1-4,j1-4)
-                      iw = indw(i + 4,j + 4)
+                      iw = ((indx(i + 4,j + 4)-1)*limkl + kl)
                       ww(iw) = ww(iw) + cc*wrepp
                     end do
                   end do
@@ -1370,15 +1375,6 @@
 ! *** CORE-CORE REPULSIONS FOR MNDO.
       call ccrep (ni, nj, r, enuc, gab)
       return
-      contains
-
-
-      integer function indw (i, j)
-      integer, intent(in) :: i
-      integer, intent(in) :: j
-      indw = (indx(i,j)-1)*limkl + kl
-      return
-      end function indw
       end subroutine rotatd
 
 
@@ -1390,6 +1386,7 @@
 !     *
 !     ROTATION MATRIX FOR A GIVEN ATOM PAIR I-J (I.GT.J).
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1689,6 +1686,7 @@
 !-----------------------------------------------
       use parameters_C, only : tore, po, ddp
       use funcon_C, only : ev
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1879,6 +1877,7 @@
 !     ROTATION OF TWO-ELECTRON TWO-CENTER INTEGRALS IN SPD BASIS
 !     FIRST STEP
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -2000,6 +1999,7 @@
 !     *
 !     STORE TWO-CENTER TWO-ELECTRON INTEGRALS IN A SQUARE MATRIX.
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -2175,6 +2175,7 @@ end subroutine wstore
 !     DB     CHARGE SEPARATION OF CONFIGURATION 2.
 !     ADD    ADDITIVE TERM
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -2379,6 +2380,7 @@ end subroutine wstore
 !   ELENUC - Nuclear stabilization terms added to one-electron matrix
 !
 !***********************************************************************
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -3468,6 +3470,7 @@ end subroutine wstore
       subroutine to_point(r, point, const)
         use molkst_C, only : trunc_1, trunc_2
         use funcon_C, only : ev, a0
+        !$acc routine seq
         double precision, intent(in) :: r
         double precision, intent(out) :: point, const
 !
