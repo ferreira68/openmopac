@@ -21,6 +21,7 @@
 !   M o d u l e s
 !-----------------------------------------------
 !
+      use mopac_magma, only : magma_setup
       use common_arrays_C, only : nfirst, nlast, nat, xparam, grad, nw, &
       p, pa, pb, labels, loc, time_start, l_atom, coord, txtatm, coorda, &
       txtatm1, cell_ijk, eigs, c, breaks
@@ -270,6 +271,7 @@
       if (moperr .and. numcal == 1+numcal0 .and. index(keywrd_txt," GEO_DAT") == 0) goto 100
       if (moperr) goto 101
       if (numcal == 1+numcal0) then
+        call magma_setup(keywrd, iw)   ! GPU eigensolver selection (mopac_magma; no-op without -DMOPAC_MAGMA)
 #ifdef MKL
         num_threads = min(mkl_get_max_threads(), 20)
         i = index(keywrd, " THREADS")

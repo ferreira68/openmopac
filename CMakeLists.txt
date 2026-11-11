@@ -221,6 +221,29 @@ if(THREADS_KEYWORD)
   endif()
 endif()
 
+# MAGMA GPU eigensolver (src/matrix/mopac_magma.F90). Static by design: MAGMA_ROOT holds a static,
+# position-independent libmagma.a; CUDA_STATIC_LIB is a CUDA toolkit lib64 directory with the static
+# cuBLAS/cuBLASLt/cudart/culibos archives, so the result needs only the NVIDIA driver at run time.
+# This block precedes MOPAC_LINK so MAGMA's LAPACK references resolve against the BLAS/LAPACK given there.
+set(MAGMA_ROOT "" CACHE PATH "Install prefix of a static, PIC MAGMA build (enables -DMOPAC_MAGMA)")
+set(CUDA_STATIC_LIB "" CACHE PATH "CUDA toolkit lib64 directory holding the static CUDA archives")
+if(MAGMA_ROOT)
+  if(NOT CUDA_STATIC_LIB)
+    message(FATAL_ERROR "MAGMA_ROOT requires CUDA_STATIC_LIB (CUDA toolkit lib64 with the *_static.a archives)")
+  endif()
+  message(STATUS "MAGMA GPU eigensolver: ${MAGMA_ROOT} with static CUDA from ${CUDA_STATIC_LIB}")
+  target_compile_definitions(mopac-core PRIVATE MOPAC_MAGMA)
+  target_link_libraries(mopac-core PUBLIC
+    ${MAGMA_ROOT}/lib/libmagma.a
+    ${CUDA_STATIC_LIB}/libcusparse_static.a
+    ${CUDA_STATIC_LIB}/libcublas_static.a
+    ${CUDA_STATIC_LIB}/libcublasLt_static.a
+    ${CUDA_STATIC_LIB}/libcudart_static.a
+    ${CUDA_STATIC_LIB}/libculibos.a
+    stdc++ dl rt pthread)
+  target_link_options(mopac-core PRIVATE "LINKER:--no-undefined")
+endif()
+
 # Additional link line
 set(MOPAC_LINK "" CACHE STRING "Additional link line for MOPAC executable.")
 set(MOPAC_LINK_PATH "" CACHE STRING "Path of external dependencies to bundle.")
