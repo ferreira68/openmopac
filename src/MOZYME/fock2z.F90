@@ -713,7 +713,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     double precision, dimension (171) :: fdummy = 0.d0
     double precision, dimension (2025) :: wjloc = 0.d0
     integer :: acc_mode, pass, npass, filter
-    logical :: p_on_device
+    logical :: p_on_device, acc_ok
     integer(8) :: c0, c1, crate
     double precision :: tg
     double precision, allocatable :: fg(:)
@@ -782,11 +782,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
         end do
       end do
     end do
-   !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: point-charge pairs and NDDO pairs of s,p atoms
-   !   on the device (acc_fz2n, called at the end, after the CPU terms, so that the device copy of F
-   !   is complete); the loop below then does only the NDDO pairs that involve d orbitals
-   !   (filter = 1). MOPAC_ACC_FOCK=test runs the CPU loop in two passes (filter 1, then filter 2 = all
-   !   other pairs) and compares with the GPU result. filter = 0: every pair, as without OpenACC.
+   !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: every atom pair on the device (acc_fz2n,
+   !   called at the end, after the one-center and COSMO terms, so that the device copy of F is
+   !   complete); the pair loop below is then skipped (npass = 0). MOPAC_ACC_FOCK=test: the GPU terms
+   !   go into a copy of F made here, the CPU loop runs as usual, and the two are compared.
+   !   filter (1: only pairs with d orbitals, 2: all other pairs) is kept for diagnostics; 0 = all.
     p_on_device = pd_ok        ! set by the GPU density build if the device copy of P is current
     fd_ok = .false.
     pd_ok = .false.
@@ -795,22 +795,21 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     npass = 1
     filter = 0
     tg = 0.d0
-    if (acc_mode == 1) then
-      filter = 1
-    else if (acc_mode == 2) then
-      npass = 2
-      filter = 1
+    if (acc_mode /= 0) then
+      call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .false., .false., .true., acc_ok)
+      if (.not. acc_ok) acc_mode = 0
     end if
-    do pass = 1, npass
-    if (pass == 2) then
+    if (acc_mode == 1) then
+      npass = 0
+    else if (acc_mode == 2) then
       allocate (fg(mpack))
       fg(1:mpack) = f(1:mpack)
       call system_clock (c0, crate)
-      call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false., .false.)
+      call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false., .false., .false., acc_ok)
       call system_clock (c1)
       tg = dble(c1 - c0)/dble(crate)
-      filter = 2
     end if
+    do pass = 1, npass
     kr = 0
     ired = 1
     do ii = 1, numat
@@ -1334,7 +1333,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     if (mode == -1) f = -f
    ! The following routine adds the dielectric correction to F.
     if (useps .and. mode == 0) call addfckz()
-    if (acc_mode == 1) call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .true., p_on_device)
+    if (acc_mode == 1) call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .true., p_on_device, .false., acc_ok)
 end subroutine fz2n
 subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
      & diagonal, kr)

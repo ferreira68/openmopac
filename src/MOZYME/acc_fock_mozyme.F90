@@ -189,12 +189,14 @@ integer function acc_fock_mode()
   acc_fock_mode = mode
 end function acc_fock_mode
 
-subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device)
+subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepare, supported)
 ! Adds the GPU part of the two-center Fock terms to f. f and ptot are copied to the device buffers
 ! fd and pd, the kernel adds to fd, and fd is copied back to f. If resident, f and ptot are the
 ! complete common_arrays f and p, so fd and pd remain valid for diagg1 (fd_ok, pd_ok).
 ! If p_on_device, pd already holds ptot (left by the GPU density build) and is not copied again,
 ! after a sampled comparison.
+! prepare: only (re)build the pair lists and return supported = .false. if some NDDO pair is of a
+! kind the GPU code does not handle (then fz2n uses the CPU for everything).
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
@@ -208,21 +210,29 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device)
   double precision, intent(inout) :: f(*)
   double precision, intent(in) :: ptot(*), qe(*), coord(3,*)
   integer, intent(in) :: iorbs(*), nat(*)
-  logical, intent(in) :: resident, p_on_device
+  logical, intent(in) :: resident, p_on_device, prepare
+  logical, intent(out) :: supported
 #ifdef _OPENACC
   logical :: p_reuse
   integer, save :: nreuse = 0
   double precision, pointer, contiguous :: fdev(:), pdev(:)
-  integer, save :: nnear = 0, my_gen = -1
+  integer, save :: nnear = 0, my_gen = -1, nd = 0
   integer, allocatable, save :: nstart(:), near(:)
+! NDDO pairs that involve d orbitals: dpi > dpj, and per atom the list of those pairs (dlist,
+! +k: the atom is dpi(k); -k: the atom is dpj(k)), in increasing k.
+  integer, allocatable, save :: dpi(:), dpj(:), dstart(:), dlist(:)
+  double precision, allocatable, save :: cdi(:,:), cdj(:,:)
+  logical, save :: unsupported = .false.
+  integer :: kd, m
+  integer, allocatable :: dtmp(:)
   logical :: spi, spj, rebuilt
   integer :: a, b, ii, jj, k
   rebuilt = acc_mozyme_sync()   ! separate statement: Fortran need not evaluate a function inside .or.
   if (rebuilt .or. my_gen /= nij_gen) then
 ! New geometry or new set of interactions: rebuild the NDDO s,p neighbor lists (CSR).
     if (allocated(nstart)) then
-      !$acc exit data delete(nstart, near)
-      deallocate (nstart, near)
+      !$acc exit data delete(nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
+      deallocate (nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
     end if
     allocate (nstart(numat + 1))
     nnear = 0
@@ -246,9 +256,56 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device)
       end do
     end do
     nstart(numat + 1) = nnear + 1
-    !$acc enter data copyin(nstart, near)
+! NDDO pairs with d orbitals (the complement of the s,p list among NDDO pairs)
+    unsupported = .false.
+    nd = 0
+    do k = 1, 2
+      if (k == 2) allocate (dpi(max(1, nd)), dpj(max(1, nd)))
+      nd = 0
+      do a = 2, numat
+        if (iorbs(a) == 0) cycle
+        spi = (iorbs(a) == 1 .or. iorbs(a) == 4) .and. .not. dorbs(nat(a)) .and. iod(nat(a)) == 0
+        do b = 1, a - 1
+          if (iorbs(b) == 0 .or. nij(a, b) < 0) cycle
+          spj = (iorbs(b) == 1 .or. iorbs(b) == 4) .and. .not. dorbs(nat(b)) .and. iod(nat(b)) == 0
+          if (spi .and. spj) cycle
+          if (iorbs(a) <= 5 .and. iorbs(b) <= 5) unsupported = .true.   ! not an s,p pair and not a d pair
+          nd = nd + 1
+          if (k == 2) then
+            dpi(nd) = a
+            dpj(nd) = b
+          end if
+        end do
+      end do
+    end do
+    allocate (dstart(numat + 1), dlist(max(1, 2*nd)), cdi(45, max(1, nd)), cdj(45, max(1, nd)))
+    dstart = 0
+    do kd = 1, nd
+      dstart(dpi(kd)) = dstart(dpi(kd)) + 1
+      dstart(dpj(kd)) = dstart(dpj(kd)) + 1
+    end do
+    m = 1
+    do a = 1, numat
+      k = dstart(a)
+      dstart(a) = m
+      m = m + k
+    end do
+    dstart(numat + 1) = m
+    allocate (dtmp(numat))
+    dtmp(1:numat) = dstart(1:numat)
+    do kd = 1, nd
+      dlist(dtmp(dpi(kd))) = kd
+      dtmp(dpi(kd)) = dtmp(dpi(kd)) + 1
+      dlist(dtmp(dpj(kd))) = -kd
+      dtmp(dpj(kd)) = dtmp(dpj(kd)) + 1
+    end do
+    deallocate (dtmp)
+    if (unsupported) write (iw, '(a)') ' ACC FOCK: NDDO pairs of an unsupported kind; the GPU Fock build is not used'
+    !$acc enter data copyin(nstart, near, dpi, dpj, dstart, dlist) create(cdi, cdj)
     my_gen = nij_gen
   end if
+  supported = .not. unsupported
+  if (prepare .or. unsupported) return
   call acc_mozyme_buffers(mpack)
   call acc_to_device(fd_c, f, mpack)
   p_reuse = .false.
@@ -265,6 +322,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device)
   call c_f_pointer(fd_c, fdev, [mpack])
   call c_f_pointer(pd_c, pdev, [mpack])
   call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
+  if (nd > 0) call acc_fz2n_dpairs(numat, mpack, nd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
   call acc_from_device(f, fd_c, mpack)
   fd_ok = .false.
   pd_ok = .false.
@@ -272,10 +330,96 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device)
     fd_ok = (loc(f(1)) == loc(fcom(1)))
     pd_ok = (loc(ptot(1)) == loc(pcom(1)))
   end if
+#else
+  supported = .false.
 #endif
 end subroutine acc_fz2n
 
 #ifdef _OPENACC
+subroutine acc_fz2n_dpairs(numat, mpack, nd, f, ptot, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
+! NDDO pairs that involve d orbitals, one thread per pair: integrals from the general rotate, then
+! the contraction of focd2z (direct mode, wk = wj). Each thread subtracts the exchange terms from
+! its pair's off-diagonal block of f (one writer per block) and stores the contributions to the two
+! diagonal blocks in cdi (higher atom) and cdj (lower atom); a second kernel adds those to f, one
+! gang per atom, summing over the atom's pairs in a fixed order.
+  implicit none
+  integer, intent(in) :: numat, mpack, nd
+  double precision, intent(inout) :: f(mpack)
+  double precision, intent(in) :: ptot(mpack), coord(3, numat)
+  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), dpi(nd), dpj(nd), dstart(numat + 1), dlist(*)
+  double precision, intent(inout) :: cdi(45, nd), cdj(45, nd)
+  integer :: kd, ii, jj, iab, jba, di, dj, l, i, j, k, ka, kc, ij, kl, ll, loop, ik, il, jk, jl, kr, a, e, npk, m, x
+  double precision :: w(2025), e1b(45), e2a(45), enuc, aa, bb, wv, s
+  !$acc routine(rotate) seq
+  !$acc data present(nij, dpi, dpj, dstart, dlist, cdi, cdj) copyin(iorbs, nat, coord) deviceptr(f, ptot)
+  !$acc parallel loop gang vector_length(64) private(w, e1b, e2a, enuc, ii, jj, iab, jba, di, dj, l, kr, loop, ka, kc, &
+  !$acc& ij, kl, aa, bb, wv, ik, il, jk, jl, i, j, k, ll)
+  do kd = 1, nd
+    ii = dpi(kd)
+    jj = dpj(kd)
+    kr = 1
+    call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, kr, e1b, e2a, enuc)
+    iab = iorbs(ii)
+    jba = iorbs(jj)
+    di = nij(ii, ii)
+    dj = nij(jj, jj)
+    l = nij(ii, jj)
+    do x = 1, 45
+      cdi(x, kd) = 0.d0
+      cdj(x, kd) = 0.d0
+    end do
+    loop = 0
+    do i = 1, iab
+      ka = (i*(i - 1))/2
+      aa = 2.0d0
+      do j = 1, i
+        if (i == j) aa = 1.0d0
+        ij = ka + j
+        do k = 1, jba
+          kc = (k*(k - 1))/2
+          bb = 2.0d0
+          do ll = 1, k
+            if (k == ll) bb = 1.0d0
+            kl = kc + ll
+            loop = loop + 1
+            wv = w(loop)
+            cdi(ij, kd) = cdi(ij, kd) + bb*wv*ptot(dj + kl)
+            cdj(kl, kd) = cdj(kl, kd) + aa*wv*ptot(di + ij)
+            wv = w(loop)*aa*bb*0.125d0
+            ik = (i - 1)*jba + k
+            il = (i - 1)*jba + ll
+            jk = (j - 1)*jba + k
+            jl = (j - 1)*jba + ll
+            f(l + ik) = f(l + ik) - wv*ptot(l + jl)
+            f(l + il) = f(l + il) - wv*ptot(l + jk)
+            f(l + jk) = f(l + jk) - wv*ptot(l + il)
+            f(l + jl) = f(l + jl) - wv*ptot(l + ik)
+          end do
+        end do
+      end do
+    end do
+  end do
+  !$acc parallel loop gang vector_length(64) private(npk)
+  do a = 1, numat
+    if (dstart(a + 1) == dstart(a)) cycle
+    npk = (iorbs(a)*(iorbs(a) + 1))/2
+    !$acc loop vector private(s, m, kd)
+    do e = 1, npk
+      s = 0.d0
+      do m = dstart(a), dstart(a + 1) - 1
+        kd = dlist(m)
+        if (kd > 0) then
+          s = s + cdi(e, kd)
+        else
+          s = s + cdj(e, -kd)
+        end if
+      end do
+      f(nij(a, a) + e) = f(nij(a, a) + e) + s
+    end do
+  end do
+  !$acc end data
+end subroutine acc_fz2n_dpairs
+
 subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, nstart, near, lnear)
   implicit none
   integer, intent(in) :: numat, mpack, lnear
