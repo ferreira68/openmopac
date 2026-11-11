@@ -43,6 +43,7 @@ module mopac_magma
   implicit none
   private
   public :: magma_on, magma_device, magma_ngpu, magma_min_n, magma_calls, magma_cpu_fallbacks, magma_setup, magma_fits
+  public :: magma_timing, magma_wall, magma_workspace, mg_work, mg_iwork
 #ifdef MOPAC_MAGMA
   public :: MagmaUpper, MagmaLower, MagmaVec, magma_dsyevd, magma_dsyevd_m
 #endif
@@ -53,6 +54,11 @@ module mopac_magma
   integer :: magma_min_n = 1000           ! smallest matrix order sent to the GPU
   integer :: magma_calls = 0              ! eigensolves done on the GPU
   integer :: magma_cpu_fallbacks = 0      ! GPU attempts that failed and were redone on the CPU
+  logical :: magma_timing = .false.       ! TIMES keyword: print a per-call breakdown of the GPU eigensolve
+  ! Persistent eigensolver workspaces: allocated once (grown when needed) instead of on every call,
+  ! which for N = 12,362 is a 2.4 GB allocation and first touch per SCF iteration.
+  double precision, allocatable :: mg_work(:)
+  integer(c_int), allocatable :: mg_iwork(:)
 
 #ifdef MOPAC_MAGMA
   integer(c_int), parameter :: MagmaUpper = 121, MagmaLower = 122, MagmaVec = 302   ! magma_types.h
@@ -121,6 +127,7 @@ contains
     if (done) return
     done = .true.
     magma_on = .false.
+    magma_timing = index(keywrd, " TIMES") /= 0
     call get_environment_variable("MOPAC_MAGMA_MIN_N", env, status=ios)
     if (ios == 0) then
       read (env, *, iostat=ios) i
@@ -252,5 +259,37 @@ contains
     if (n < 0) magma_fits = .false.
 #endif
   end function magma_fits
+
+  double precision function magma_wall()
+    ! Wall-clock seconds (for the TIMES breakdown).
+    integer(8) :: count, rate
+    call system_clock(count, rate)
+    magma_wall = dble(count)/dble(rate)
+  end function magma_wall
+
+  subroutine magma_workspace(lwork, liwork, ok)
+    ! Make sure the persistent workspaces hold at least lwork doubles and liwork integers.
+    integer, intent(in) :: lwork, liwork
+    logical, intent(out) :: ok
+    integer :: stat
+    ok = .true.
+    if (allocated(mg_work)) then
+      if (size(mg_work) < lwork) deallocate (mg_work)
+    end if
+    if (.not. allocated(mg_work)) then
+      allocate (mg_work(lwork), stat=stat)
+      if (stat /= 0) then
+        ok = .false.
+        return
+      end if
+    end if
+    if (allocated(mg_iwork)) then
+      if (size(mg_iwork) < liwork) deallocate (mg_iwork)
+    end if
+    if (.not. allocated(mg_iwork)) then
+      allocate (mg_iwork(liwork), stat=stat)
+      if (stat /= 0) ok = .false.
+    end if
+  end subroutine magma_workspace
 
 end module mopac_magma

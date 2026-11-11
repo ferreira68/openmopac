@@ -15,9 +15,10 @@
 
     Subroutine eigenvectors_LAPACK(eigenvecs, xmat, eigvals, ndim)
       USE chanel_C, only : iw
-      use mopac_magma, only : magma_fits, magma_calls, magma_cpu_fallbacks
+      use mopac_magma, only : magma_fits, magma_calls, magma_cpu_fallbacks, magma_timing, magma_wall
 #ifdef MOPAC_MAGMA
-      use mopac_magma, only : magma_dsyevd, magma_dsyevd_m, magma_ngpu, MagmaUpper, MagmaLower, MagmaVec
+      use mopac_magma, only : magma_dsyevd, magma_dsyevd_m, magma_ngpu, MagmaUpper, MagmaLower, MagmaVec, &
+        magma_workspace, mg_work, mg_iwork
 #endif
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
@@ -33,7 +34,8 @@
       Integer, dimension(1:10) :: iwork_tmp
       double precision, allocatable :: work(:)
       Integer, allocatable :: iwork(:)
-      logical :: use_gpu
+      logical :: use_gpu, ok
+      double precision :: t0, t1, t2, t3, t4
 !==============================================================================
 ! Code to find all eigenvectors and all eigenvalues for a symmetric General matrix
 ! using LAPACK and MAGMA
@@ -43,6 +45,7 @@
 ! and solved with CPU dsyevd.
 !==============================================================================
       continue
+      t0 = magma_wall()
       eigvals = 0.d0
       eigenvecs = 0.d0
 
@@ -80,6 +83,7 @@ end if
           eigenvecs(j+1:ndim, j) = eigenvecs(j, j+1:ndim)
         end do
       end if
+      t1 = magma_wall()
       if (use_gpu) then
         if (magma_ngpu > 1) then
           i = magma_dsyevd_m(magma_ngpu, MagmaVec, MagmaLower, ndim, eigenvecs, ndim, eigvals, work_tmp, -1, &
@@ -91,15 +95,20 @@ end if
           if (work_tmp(1) <= dble(huge(lwork))) then
             lwork = int(work_tmp(1))
             liwork = iwork_tmp(1)
-            allocate (work(lwork), iwork(liwork), stat = i)
-            if (i == 0) then
+            t2 = magma_wall()
+            call magma_workspace(lwork, liwork, ok)
+            t3 = magma_wall()
+            if (ok) then
               if (magma_ngpu > 1) then
-                i = magma_dsyevd_m(magma_ngpu, MagmaVec, MagmaLower, ndim, eigenvecs, ndim, eigvals, work, lwork, &
-                  iwork, liwork, info)
+                i = magma_dsyevd_m(magma_ngpu, MagmaVec, MagmaLower, ndim, eigenvecs, ndim, eigvals, mg_work, lwork, &
+                  mg_iwork, liwork, info)
               else
-                i = magma_dsyevd(MagmaVec, MagmaUpper, ndim, eigenvecs, ndim, eigvals, work, lwork, iwork, liwork, info)
+                i = magma_dsyevd(MagmaVec, MagmaUpper, ndim, eigenvecs, ndim, eigvals, mg_work, lwork, mg_iwork, liwork, info)
               end if
-              deallocate (iwork, work, stat = j)
+              t4 = magma_wall()
+              if (magma_timing) write(iw,'(a,i0,a,4f8.2,a,f8.2)') ' MAGMA order ', ndim, &
+                ': zero+perturb+unpack, query, workspace, solve (s):', t1 - t0, t2 - t1, t3 - t2, t4 - t3, &
+                '  total', t4 - t0
               if (info == 0) then
                 magma_calls = magma_calls + 1
                 return
