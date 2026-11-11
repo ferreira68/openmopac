@@ -28,6 +28,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     use MOZYME_C, only : lijbo, nijbo, ncf, ncocc, &
       nncf, iorbs, cocc, icocc
     use chanel_C, only: iw
+    use acc_mozyme_C, only : pd_ok
     implicit none
     integer, intent (in) :: mode, nclose_loc
     double precision, dimension (mpack), intent (in) :: partp
@@ -37,9 +38,32 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     integer :: i, j, j1, ja, jj, k, k1, k2, ka, kk, l, loop, nj
     double precision :: spinfa, sum
     integer, external :: ijbo
+    integer, external :: acc_density_mode
+    integer :: gmode
+    integer(8) :: gc0, gc1, grate
+    double precision :: tg
+    double precision, allocatable :: pg(:)
     if (first) then
       first = .false.
       prnt = Index (keywrd, " DIAG ") /= 0
+    end if
+    !
+    !  GPU (OpenACC) version, MOPAC_ACC_DENS set, full density only (acc_density_mozyme.F90).
+    !  "test": the GPU result goes into a copy and is compared with the CPU result.
+    !  The device copy of P is no longer current once P is rebuilt here on the CPU.
+    !
+    pd_ok = .false.
+    gmode = 0
+    if (mode == 0 .and. lijbo) gmode = acc_density_mode()
+    if (gmode == 1) then
+      call acc_density_core (p, nclose_loc, .true.)
+      go to 900
+    else if (gmode == 2) then
+      allocate (pg(mpack))
+      call system_clock (gc0, grate)
+      call acc_density_core (pg, nclose_loc, .false.)
+      call system_clock (gc1)
+      tg = dble(gc1 - gc0)/dble(grate)
     end if
     if (mode == 0) then
       !
@@ -144,6 +168,11 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     if (Abs(spinfa - 1.d0) > 1.d-10) then
       p(:) = spinfa * p(:)
     end if
+    if (gmode == 2) then
+      call acc_density_compare (p, pg, tg)
+      deallocate (pg)
+    end if
+900 continue
     if (prnt) then
       sum = 0.d0
       if (lijbo) then

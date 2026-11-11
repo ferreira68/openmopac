@@ -16,6 +16,7 @@
 subroutine cnvgz (pnew, p, p1, p2, p3, niter, idiag)
     use molkst_C, only: norbs, mpack
     use MOZYME_C, only : use_three_point_extrap, pmax
+    use acc_mozyme_C, only : pd_ok
     implicit none
     integer, intent (in) :: niter
     integer, dimension (norbs), intent (in) :: idiag ! Pointers to diagonal elements
@@ -24,6 +25,7 @@ subroutine cnvgz (pnew, p, p1, p2, p3, niter, idiag)
     integer :: i, j
     double precision :: damp, fac, faca, facb, sa
     intrinsic Abs, Max, Min, Mod, Sign, Sqrt
+    if (use_three_point_extrap) pd_ok = .false.   ! pnew (the density) may be modified below
    !
    ! Save the diagonal of the current and previous density for later use
    !

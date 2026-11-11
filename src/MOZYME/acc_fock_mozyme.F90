@@ -189,24 +189,29 @@ integer function acc_fock_mode()
   acc_fock_mode = mode
 end function acc_fock_mode
 
-subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident)
+subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device)
 ! Adds the GPU part of the two-center Fock terms to f. f and ptot are copied to the device buffers
 ! fd and pd, the kernel adds to fd, and fd is copied back to f. If resident, f and ptot are the
 ! complete common_arrays f and p, so fd and pd remain valid for diagg1 (fd_ok, pd_ok).
+! If p_on_device, pd already holds ptot (left by the GPU density build) and is not copied again,
+! after a sampled comparison.
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
   use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
-    fd_c, pd_c, fd_ok, pd_ok
+    fd_c, pd_c, fd_ok, pd_ok, acc_matches_device
   use iso_c_binding, only : c_f_pointer
   use common_arrays_C, only : fcom => f, pcom => p
+  use chanel_C, only : iw
 #endif
   implicit none
   double precision, intent(inout) :: f(*)
   double precision, intent(in) :: ptot(*), qe(*), coord(3,*)
   integer, intent(in) :: iorbs(*), nat(*)
-  logical, intent(in) :: resident
+  logical, intent(in) :: resident, p_on_device
 #ifdef _OPENACC
+  logical :: p_reuse
+  integer, save :: nreuse = 0
   double precision, pointer, contiguous :: fdev(:), pdev(:)
   integer, save :: nnear = 0, my_gen = -1
   integer, allocatable, save :: nstart(:), near(:)
@@ -246,7 +251,17 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident)
   end if
   call acc_mozyme_buffers(mpack)
   call acc_to_device(fd_c, f, mpack)
-  call acc_to_device(pd_c, ptot, mpack)
+  p_reuse = .false.
+  if (p_on_device .and. allocated(pcom)) then
+    if (loc(ptot(1)) == loc(pcom(1))) p_reuse = acc_matches_device(pd_c, ptot, mpack, 0.d0)
+    if (.not. p_reuse) write (iw, '(a)') ' ACC FOCK: device copy of P was stale; copied again'
+  end if
+  if (p_reuse) then
+    nreuse = nreuse + 1
+    if (nreuse == 1) write (iw, '(a)') ' ACC FOCK: using the device copy of P from the GPU density build'
+  else
+    call acc_to_device(pd_c, ptot, mpack)
+  end if
   call c_f_pointer(fd_c, fdev, [mpack])
   call c_f_pointer(pd_c, pdev, [mpack])
   call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
