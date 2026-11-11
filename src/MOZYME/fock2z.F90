@@ -711,6 +711,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     double precision, dimension (45) :: e1b, e2a
     double precision, dimension (171) :: fdummy = 0.d0
     double precision, dimension (2025) :: wjloc = 0.d0
+    integer :: acc_mode, pass, npass, filter
+    integer(8) :: c0, c1, crate
+    double precision :: tg
+    double precision, allocatable :: fg(:)
+    integer, external :: acc_fock_mode
    !
     dx = 0.d0
     dy = 0.d0
@@ -775,6 +780,32 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
         end do
       end do
     end do
+   !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: point-charge pairs and NDDO pairs of s,p atoms
+   !   on the device (acc_fz2n); the loop below then does only the NDDO pairs that involve d orbitals
+   !   (filter = 1). MOPAC_ACC_FOCK=test runs the CPU loop in two passes (filter 1, then filter 2 = all
+   !   other pairs) and compares with the GPU result. filter = 0: every pair, as without OpenACC.
+    acc_mode = 0
+    if (mode == 0 .and. direct .and. semidr .and. ione == 1) acc_mode = acc_fock_mode()
+    npass = 1
+    filter = 0
+    tg = 0.d0
+    if (acc_mode == 1) then
+      call acc_fz2n (f, ptot, qe, iorbs, nat, coord)
+      filter = 1
+    else if (acc_mode == 2) then
+      npass = 2
+      filter = 1
+    end if
+    do pass = 1, npass
+    if (pass == 2) then
+      allocate (fg(mpack))
+      fg(1:mpack) = f(1:mpack)
+      call system_clock (c0, crate)
+      call acc_fz2n (fg, ptot, qe, iorbs, nat, coord)
+      call system_clock (c1)
+      tg = dble(c1 - c0)/dble(crate)
+      filter = 2
+    end if
     kr = 0
     ired = 1
     do ii = 1, numat
@@ -798,6 +829,9 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
               jred = jred + 1
             end if
             jba = iorbs(jj)
+            if (filter /= 0) then
+              if ((nijbo(ii, jj) >= 0 .and. (iab > 5 .or. jba > 5)) .neqv. (filter == 1)) cycle
+            end if
             if (nijbo(ii, jj) >= 0) then
               if (direct .and. (calci .or. calcj)) then
                 call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), wjloc, kr, e1b, e2a, enuc)
@@ -1274,6 +1308,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
           end if
         end if
     end do
+    end do
+    if (acc_mode == 2) then
+      call acc_fock_compare (f, fg, tg)
+      deallocate (fg)
+    end if
     if (direct) then
       kr = 0
       ired = 1
