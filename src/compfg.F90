@@ -121,7 +121,11 @@
         sum_dihed = 0.d0
         if (iseps) then
           iseps = .true.
-          noeps = .true.
+!         By default the first SCF is run in the gas phase and COSMO is switched on only
+!         after it converges (the gas-phase density is just the starting guess). NOGASSCF
+!         starts the SCF in solvent instead, for systems whose gas-phase SCF does not
+!         converge (e.g. heavily ionized proteins).
+          noeps = (index(keywrd, " NOGASSCF") == 0)
           call cosini(.true.)
           if (moperr) return
           mozyme = (index(keywrd," MOZ") + index(keywrd," LOCATE-TS") + index(keywrd," RAPID") /= 0)
@@ -202,7 +206,7 @@
           call mkbmat
         end if
         if (moperr) return
-        if (noeps) useps = .false.
+        useps = .not. noeps   ! default first call: gas phase; later calls or NOGASSCF: COSMO
       end if
       if (index(keywrd,' HCORE') /= 0) call prtpar
       if (times) call timer ('BEFORE HCORE')

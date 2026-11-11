@@ -1448,6 +1448,8 @@ subroutine wrtcon (allkey)
   end if
   if (myword(allkey, " DIPL"))  write (iw,'(" *  DIPL=", f7.3)') reada (keywrd, Index (keywrd, " DIPL"))
   if (myword(allkey, " RSOLV")) write (iw,'(" *  RSOLV=", f7.3)') reada (keywrd, Index (keywrd, " RSOLV"))
+  if (myword(allkey, " NOGASSCF")) &
+    write (iw,'(" *  NOGASSCF   - IN COSMO, START THE SCF IN SOLVENT (SKIP THE GAS-PHASE PRE-SCF)")')
   if (myword(allkey, " DELSC")) write (iw,'(" *  DELSC=", f7.3)') reada (keywrd, Index (keywrd, " DELSC"))
   if (myword(allkey, " DISEX")) write (iw,'(" *  DISEX=", f7.3)') reada (keywrd, Index (keywrd, " DISEX"))
   i = Index(keywrd, "N**2")
