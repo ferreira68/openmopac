@@ -784,7 +784,10 @@
         end if
         keywrd = trim(keywrd_txt)
       end if
+      ! NOFEATHER: keep the full NDDO integrals at all distances.  Without it, MOZYME silently turns
+      ! feathering on for PM6-based methods, so MOZYME and conventional PM6 solve different Hamiltonians.
       l_feather = (method_PM7 .or. method_pm6_org .or. index(keywrd, " MOZ") /= 0 .and. (index(keywrd, " PM6") /= 0))
+      if (index(keywrd, " NOFEATHER") /= 0) l_feather = .false.
       l_feather_1 = (index(keywrd, " MACRO") /= 0)
       write (iw, &
       '(/24X,A,'' CALCULATION RESULTS'',2/1X,15(''*****''),''****'' )') "     "//trim(caltyp)

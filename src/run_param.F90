@@ -101,7 +101,10 @@
     escf = 0.d0
     solv_energy = 0.d0
     iflepo = 0
+    ! NOFEATHER: keep the full NDDO integrals at all distances.  Without it, MOZYME silently turns
+    ! feathering on for PM6-based methods, so MOZYME and conventional PM6 solve different Hamiltonians.
     l_feather = (method_PM7 .or. method_pm6_org .or. index(keywrd, " MOZ") /= 0 .and. (index(keywrd, " PM6") /= 0))
+    if (index(keywrd, " NOFEATHER") /= 0) l_feather = .false.
     t_par(1)  = "Used in ccrep for scalar correction of C-C triple bonds."
     t_par(2)  = "Used in ccrep for exponent correction of C-C triple bonds."
     t_par(3)  = "Used in ccrep for scalar correction of O-H term."

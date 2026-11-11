@@ -193,7 +193,10 @@ contains
     methods(i) = .true.
     keywrd = trim(keywrd) // methods_keys(i)
     ! feathered interactions for PM6-ORG and PM7, or for MOZYME calculations of PM6-based models
+    ! NOFEATHER: keep the full NDDO integrals at all distances.  Without it, MOZYME silently turns
+    ! feathering on for PM6-based methods, so MOZYME and conventional PM6 solve different Hamiltonians.
     l_feather = (methods(14) .or. methods(18) .or. index(keywrd, " MOZ") /= 0 .and. (index(keywrd, " PM6") /= 0))
+    if (index(keywrd, " NOFEATHER") /= 0) l_feather = .false.
     ! check for use of COSMO model
     if (system%epsilon /= 1.d0) then
       iseps = .true.

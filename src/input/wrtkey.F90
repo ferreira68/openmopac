@@ -1448,6 +1448,8 @@ subroutine wrtcon (allkey)
   end if
   if (myword(allkey, " DIPL"))  write (iw,'(" *  DIPL=", f7.3)') reada (keywrd, Index (keywrd, " DIPL"))
   if (myword(allkey, " RSOLV")) write (iw,'(" *  RSOLV=", f7.3)') reada (keywrd, Index (keywrd, " RSOLV"))
+  if (myword(allkey, " NOFEATHER")) &
+    write (iw,'(" *  NOFEATHER  - DO NOT BLEND NDDO INTEGRALS INTO POINT CHARGES (UNFEATHERED HAMILTONIAN)")')
   if (myword(allkey, " NOGASSCF")) &
     write (iw,'(" *  NOGASSCF   - IN COSMO, START THE SCF IN SOLVENT (SKIP THE GAS-PHASE PRE-SCF)")')
   if (myword(allkey, " DELSC")) write (iw,'(" *  DELSC=", f7.3)') reada (keywrd, Index (keywrd, " DELSC"))
