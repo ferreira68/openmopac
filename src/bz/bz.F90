@@ -44,7 +44,7 @@ program BZ
 #ifdef MOPAC_F2003
   i = command_argument_count()
 #else
-  i = iargc()
+  i = command_argument_count()
 #endif
   l_read_dat = (i < 2)
   if (i == 0) then

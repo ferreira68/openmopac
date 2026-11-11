@@ -1599,6 +1599,7 @@ end if
 end subroutine datinp
 logical function core_core_OK(geo, nat, numat, ni, nj, ccp)
   use parameters_C, only : alpb
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
   implicit none
   integer :: numat, ni, nj
   integer, dimension (numat) :: nat

@@ -77,7 +77,7 @@
     do i = 1, command_argument_count()
       call get_command_argument (i, jobnam)
 #else
-    do i = 1, iargc()
+    do i = 1, command_argument_count()
       call getarg (i, jobnam)
 #endif
       if (jobnam == '-V' .OR. jobnam == '--version') then

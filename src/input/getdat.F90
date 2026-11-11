@@ -51,7 +51,7 @@
 #ifdef MOPAC_F2003
         i = command_argument_count()
 #else
-        i = iargc()
+        i = command_argument_count()
 #endif
         if (i >= run) then
 #ifdef MOPAC_F2003

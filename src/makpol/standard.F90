@@ -281,7 +281,7 @@ subroutine getdat
 #ifdef MOPAC_F2003
     i = command_argument_count()
 #else
-    i = iargc()
+    i = command_argument_count()
 #endif
     if (i == 0) then
       write(*,"(a)")"                        Program MAKPOL"

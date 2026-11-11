@@ -87,6 +87,7 @@
   USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
 !
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
   implicit none
   character (len=*) :: text
 

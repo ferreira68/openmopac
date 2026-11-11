@@ -146,10 +146,10 @@ CONTAINS
     CHARACTER(len=1024) :: mdi_options
 
     ! Check for CLI mode (-mdi command-line option)
-    do i = 1, iargc()
+    do i = 1, command_argument_count()
       call getarg (i, mdi_options)
       if (mdi_options == '-mdi' .OR. mdi_options == '--mdi') then
-        if ( i .eq. iargc() ) then
+        if ( i .eq. command_argument_count() ) then
           WRITE(iw,*) "MDI ERROR: No argument was provided for the -mdi command-line option"
           stop
         else

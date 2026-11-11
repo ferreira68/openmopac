@@ -255,6 +255,7 @@
 #if MOPAC_F2003
       USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -299,6 +300,7 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
       implicit none
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
