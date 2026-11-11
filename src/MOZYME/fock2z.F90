@@ -678,6 +678,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !      & qdenet, qscnet, gden, qscat
 
      use linear_cosmo, only: addfckz
+    use acc_mozyme_C, only : fd_ok, pd_ok
 
     implicit none
    !***********************************************************************
@@ -781,16 +782,18 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
       end do
     end do
    !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: point-charge pairs and NDDO pairs of s,p atoms
-   !   on the device (acc_fz2n); the loop below then does only the NDDO pairs that involve d orbitals
+   !   on the device (acc_fz2n, called at the end, after the CPU terms, so that the device copy of F
+   !   is complete); the loop below then does only the NDDO pairs that involve d orbitals
    !   (filter = 1). MOPAC_ACC_FOCK=test runs the CPU loop in two passes (filter 1, then filter 2 = all
    !   other pairs) and compares with the GPU result. filter = 0: every pair, as without OpenACC.
+    fd_ok = .false.
+    pd_ok = .false.
     acc_mode = 0
     if (mode == 0 .and. direct .and. semidr .and. ione == 1) acc_mode = acc_fock_mode()
     npass = 1
     filter = 0
     tg = 0.d0
     if (acc_mode == 1) then
-      call acc_fz2n (f, ptot, qe, iorbs, nat, coord)
       filter = 1
     else if (acc_mode == 2) then
       npass = 2
@@ -801,7 +804,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
       allocate (fg(mpack))
       fg(1:mpack) = f(1:mpack)
       call system_clock (c0, crate)
-      call acc_fz2n (fg, ptot, qe, iorbs, nat, coord)
+      call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false.)
       call system_clock (c1)
       tg = dble(c1 - c0)/dble(crate)
       filter = 2
@@ -1329,6 +1332,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     if (mode == -1) f = -f
    ! The following routine adds the dielectric correction to F.
     if (useps .and. mode == 0) call addfckz()
+    if (acc_mode == 1) call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .true.)
 end subroutine fz2n
 subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
      & diagonal, kr)

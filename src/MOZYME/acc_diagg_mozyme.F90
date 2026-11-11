@@ -64,7 +64,10 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   use molkst_C, only : numat, mpack
   use MOZYME_C, only : ncf, nce, nncf, nnce, ncocc, ncvir, icocc, icvir, cocc, cvir, iorbs, nfmo
   use common_arrays_C, only : nfirst, nlast, p
-  use acc_mozyme_C, only : nij_d => nij, acc_mozyme_sync
+  use acc_mozyme_C, only : nij_d => nij, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_matches_device, &
+    fd_c, pd_c, fd_ok, pd_ok
+  use common_arrays_C, only : fcom => f
+  use iso_c_binding, only : c_f_pointer
   use chanel_C, only : iw
 #endif
   implicit none
@@ -86,8 +89,45 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   double precision, allocatable, save :: cv(:)
   integer, save :: capsave = 0
   integer :: nlist, attempt
+  double precision, pointer, contiguous :: fdev(:), pdev(:)
+  logical :: fstale, pstale
+  integer, save :: nstale = 0, nreuse = 0
   ok = .true.
   dummy = acc_mozyme_sync()
+! F and P on the device: reuse the buffers left by the GPU Fock build if they hold the current
+! common_arrays f and p (checked by flag, address and a sampled comparison); otherwise copy.
+  if (fd_ok .and. pd_ok .and. allocated(fcom)) then
+    if (loc(fao(1)) /= loc(fcom(1))) then
+      fd_ok = .false.
+    else
+! eimp (called before diagg) replaces the first element of each off-diagonal block of the host P
+! by the sum of squares of that block of F, which diagg1 uses for screening: do the same on the
+! device copy, which still holds the density of the Fock build.
+      call c_f_pointer(fd_c, fdev, [mpack])
+      call c_f_pointer(pd_c, pdev, [mpack])
+      call acc_eimp_kernel(numat, mpack, fdev, pdev, nij_d, iorbs)
+      fstale = .not. acc_matches_device(fd_c, fao, mpack, 0.d0)
+      pstale = .not. acc_matches_device(pd_c, p, mpack, 1.d-12)
+      if (fstale .or. pstale) then
+        nstale = nstale + 1
+        if (nstale <= 20) write (iw, '(a,i0,a,l2,a,l2)') ' ACC DIAGG: device copy stale (occurrence ', nstale, &
+          '): F', fstale, '  P', pstale
+        fd_ok = .false.
+      end if
+    end if
+  else
+    fd_ok = .false.
+  end if
+  if (.not. fd_ok) then
+    call acc_mozyme_buffers(mpack)
+    call acc_to_device(fd_c, fao, mpack)
+    call acc_to_device(pd_c, p, mpack)
+  else
+    nreuse = nreuse + 1
+    if (nreuse == 1) write (iw, '(a)') ' ACC DIAGG: using the device copies of F and P from the GPU Fock build'
+  end if
+  call c_f_pointer(fd_c, fdev, [mpack])
+  call c_f_pointer(pd_c, pdev, [mpack])
   cap = max(1000000, 2*fmo_dim, capsave)
   do attempt = 1, 2
   if (cap /= capsave) then
@@ -102,13 +142,16 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   nlist = 0
   if (.not. full) nlist = min(sum(nfmo(1:nvir)), nij)
   call acc_diagg1_kernels(numat, mpack, nocc, nvir, size(icocc), size(cocc), size(icvir), size(cvir), &
-    fao, p, nij_d, iorbs, nfirst, nlast, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir, &
+    fdev, pdev, nij_d, iorbs, nfirst, nlast, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir, &
     cutoff, flim, full, docc, cap, ci, cj, cl, cv, ncand, eigv, eigs_occ, nlist, ifmo_in, fmo, fmo_dim, sumt, tiny)
   if (.not. full .or. ncand <= cap) exit
 ! More candidates than buffer space: enlarge the buffer and repeat once.
   write (iw, '(a,i0,a,i0,a)') ' ACC DIAGG: ', ncand, ' candidate pairs exceed the buffer (', cap, '); enlarging it'
   cap = ncand + ncand/4
   end do
+! The density changes after diagg1 (diagg2, density_for_MOZYME): the buffers are no longer current.
+  fd_ok = .false.
+  pd_ok = .false.
   if (full) then
     if (ncand > cap) then
       write (iw, '(a)') ' ACC DIAGG: candidate buffer still too small; this DIAGG1 call runs on the CPU'
@@ -125,6 +168,33 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
 end subroutine acc_diagg1_core
 
 #ifdef _OPENACC
+subroutine acc_eimp_kernel(numat, mpack, f, p, nij, iorbs)
+! Device version of eimp: p(k+1) = sum of f(m)**2 over the off-diagonal block (i, j), k = nijbo(i, j).
+  implicit none
+  integer, intent(in) :: numat, mpack, nij(numat, numat), iorbs(numat)
+  double precision, intent(in) :: f(mpack)
+  double precision, intent(inout) :: p(mpack)
+  integer :: i, j, k, l, m
+  double precision :: s
+  !$acc parallel loop gang copyin(iorbs) present(nij) deviceptr(f, p)
+  do i = 1, numat
+    !$acc loop vector private(k, l, m, s)
+    do j = 1, i - 1
+      k = nij(i, j)
+      if (k >= 0) then
+        l = iorbs(i)*iorbs(j)
+        if (l /= 0) then
+          s = 0.d0
+          do m = k + 1, k + l
+            s = s + f(m)**2
+          end do
+          p(k + 1) = s
+        end if
+      end if
+    end do
+  end do
+end subroutine acc_eimp_kernel
+
 subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, lcvir, &
   fao, p, nij, iorbs, nfirst, nlast, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir, &
   cutoff, flim, full, docc, cap, ci, cj, cl, cv, ncand, eigv, eigs_occ, nlist, ifmo_in, fmo, fmo_dim, sumt, tiny)
@@ -152,8 +222,8 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
   allocate (aocc(licocc), offo(licocc), avs(licvir), aovs(licvir), offv(licvir), wsv(lcvir))
   cnt(1) = 0
   ncand = 0
-  !$acc data copyin(fao, p, iorbs, nfirst, nlast, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir) &
-  !$acc& present(nij, ci, cj, cl, cv) create(aocc, offo, avs, aovs, offv, wsv) copyout(eigv) copy(cnt)
+  !$acc data copyin(iorbs, nfirst, nlast, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir) &
+  !$acc& present(nij, ci, cj, cl, cv) deviceptr(fao, p) create(aocc, offo, avs, aovs, offv, wsv) copyout(eigv) copy(cnt)
 !
 ! K0: occupied LMOs: aocc and atom offsets
 !

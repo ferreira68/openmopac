@@ -32,13 +32,114 @@
 ! Without OpenACC, acc_fock_mode returns 0 and the GPU routines are empty.
 
 module acc_mozyme_C
-! Device-side MOZYME data shared by the OpenACC routines (acc_fz2n, acc_diagg1_core): a copy of
-! nijbo, present on the device, refreshed when the geometry or the set of interactions changes.
+! Device-side MOZYME data shared by the OpenACC routines (acc_fz2n, acc_diagg1_core):
+! - nij: a copy of nijbo, present on the device, refreshed when the geometry or the set of
+!   interactions changes;
+! - fd, pd: device buffers (acc_malloc) of length mpack for the Fock and density matrices.
+!   They are filled by explicit copies from the host arrays, so a host array may be deallocated
+!   at any time without leaving a stale device mapping. fd_ok / pd_ok say that fd / pd hold the
+!   current common_arrays f / p: set by acc_fz2n after a complete Fock build, cleared at the start
+!   of every fz2n call and after diagg1 has used them (the density changes after diagg1).
+  use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long
   implicit none
   integer, allocatable :: nij(:,:)
   integer :: key_numcal = -1, key_mpack = -1, key_numat = -1
   integer :: nij_gen = 0   ! incremented on every rebuild; consumers compare with the generation they used
+  type(c_ptr) :: fd_c = c_null_ptr, pd_c = c_null_ptr
+  integer :: dev_len = 0
+  logical :: fd_ok = .false., pd_ok = .false.
+  interface
+    type(c_ptr) function c_acc_malloc(bytes) bind(C, name="acc_malloc")
+      import :: c_ptr, c_long_long
+      integer(c_long_long), value :: bytes
+    end function c_acc_malloc
+    subroutine c_acc_free(dev) bind(C, name="acc_free")
+      import :: c_ptr
+      type(c_ptr), value :: dev
+    end subroutine c_acc_free
+    subroutine c_acc_memcpy_to_device(dev, host, bytes) bind(C, name="acc_memcpy_to_device")
+      import :: c_ptr, c_long_long
+      type(c_ptr), value :: dev, host
+      integer(c_long_long), value :: bytes
+    end subroutine c_acc_memcpy_to_device
+    subroutine c_acc_memcpy_from_device(host, dev, bytes) bind(C, name="acc_memcpy_from_device")
+      import :: c_ptr, c_long_long
+      type(c_ptr), value :: host, dev
+      integer(c_long_long), value :: bytes
+    end subroutine c_acc_memcpy_from_device
+  end interface
 contains
+  subroutine acc_mozyme_buffers(n)
+! Makes fd and pd hold at least n doubles.
+    use iso_c_binding, only : c_associated
+    integer, intent(in) :: n
+#ifdef _OPENACC
+    if (n <= dev_len) return
+    if (c_associated(fd_c)) call c_acc_free(fd_c)
+    if (c_associated(pd_c)) call c_acc_free(pd_c)
+    fd_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
+    pd_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
+    if (.not. c_associated(fd_c) .or. .not. c_associated(pd_c)) stop 'acc_mozyme_buffers: acc_malloc failed'
+    dev_len = n
+    fd_ok = .false.
+    pd_ok = .false.
+#endif
+  end subroutine acc_mozyme_buffers
+
+  logical function acc_matches_device(dev, a, n, rtol)
+! Compares 32 elements of a, spread over 1..n, with the device buffer dev, to relative tolerance
+! rtol (0: bitwise). A cheap guard against a host write that bypassed the validity flags; it
+! cannot prove equality.
+    use iso_c_binding, only : c_loc, c_ptr
+    type(c_ptr), intent(in) :: dev
+    integer, intent(in) :: n
+    double precision, intent(in), target :: a(n)
+    double precision, intent(in) :: rtol
+    double precision, target :: x
+    integer :: k, i
+    acc_matches_device = .true.
+#ifdef _OPENACC
+    do k = 0, 31
+      i = 1 + int((int(n - 1, 8)*k)/31)
+      call c_acc_memcpy_from_device(c_loc(x), dev_offset(dev, i), 8_c_long_long)
+      if (abs(x - a(i)) > rtol*abs(a(i)) .or. (rtol == 0.d0 .and. x /= a(i))) then
+        acc_matches_device = .false.
+        return
+      end if
+    end do
+#endif
+  end function acc_matches_device
+
+  type(c_ptr) function dev_offset(dev, i)
+! Address of element i (1-based) of a double precision device buffer.
+    use iso_c_binding, only : c_intptr_t
+    type(c_ptr), intent(in) :: dev
+    integer, intent(in) :: i
+    integer(c_intptr_t) :: addr
+    addr = transfer(dev, addr) + int(i - 1, c_intptr_t)*8_c_intptr_t
+    dev_offset = transfer(addr, dev_offset)
+  end function dev_offset
+
+  subroutine acc_to_device(dev, a, n)
+    use iso_c_binding, only : c_loc
+    type(c_ptr), intent(in) :: dev
+    integer, intent(in) :: n
+    double precision, intent(in), target :: a(n)
+#ifdef _OPENACC
+    call c_acc_memcpy_to_device(dev, c_loc(a), int(n, c_long_long)*8_c_long_long)
+#endif
+  end subroutine acc_to_device
+
+  subroutine acc_from_device(a, dev, n)
+    use iso_c_binding, only : c_loc
+    type(c_ptr), intent(in) :: dev
+    integer, intent(in) :: n
+    double precision, intent(inout), target :: a(n)
+#ifdef _OPENACC
+    call c_acc_memcpy_from_device(c_loc(a), dev, int(n, c_long_long)*8_c_long_long)
+#endif
+  end subroutine acc_from_device
+
   logical function acc_mozyme_sync()
 ! Returns .true. if nij was (re)built on this call. Consumers that keep data derived from nij must
 ! compare nij_gen with the generation they built for, since another consumer may have synced first.
@@ -88,17 +189,25 @@ integer function acc_fock_mode()
   acc_fock_mode = mode
 end function acc_fock_mode
 
-subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord)
+subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident)
+! Adds the GPU part of the two-center Fock terms to f. f and ptot are copied to the device buffers
+! fd and pd, the kernel adds to fd, and fd is copied back to f. If resident, f and ptot are the
+! complete common_arrays f and p, so fd and pd remain valid for diagg1 (fd_ok, pd_ok).
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
-  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync
+  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
+    fd_c, pd_c, fd_ok, pd_ok
+  use iso_c_binding, only : c_f_pointer
+  use common_arrays_C, only : fcom => f, pcom => p
 #endif
   implicit none
   double precision, intent(inout) :: f(*)
   double precision, intent(in) :: ptot(*), qe(*), coord(3,*)
   integer, intent(in) :: iorbs(*), nat(*)
+  logical, intent(in) :: resident
 #ifdef _OPENACC
+  double precision, pointer, contiguous :: fdev(:), pdev(:)
   integer, save :: nnear = 0, my_gen = -1
   integer, allocatable, save :: nstart(:), near(:)
   logical :: spi, spj, rebuilt
@@ -135,7 +244,19 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord)
     !$acc enter data copyin(nstart, near)
     my_gen = nij_gen
   end if
-  call acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
+  call acc_mozyme_buffers(mpack)
+  call acc_to_device(fd_c, f, mpack)
+  call acc_to_device(pd_c, ptot, mpack)
+  call c_f_pointer(fd_c, fdev, [mpack])
+  call c_f_pointer(pd_c, pdev, [mpack])
+  call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
+  call acc_from_device(f, fd_c, mpack)
+  fd_ok = .false.
+  pd_ok = .false.
+  if (resident .and. allocated(fcom) .and. allocated(pcom)) then
+    fd_ok = (loc(f(1)) == loc(fcom(1)))
+    pd_ok = (loc(ptot(1)) == loc(pcom(1)))
+  end if
 #endif
 end subroutine acc_fz2n
 
@@ -150,7 +271,7 @@ subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, ns
   double precision :: c(10), cm, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, sm
   !$acc routine(acc_fz_near_sp) seq
   !$acc routine(acc_fz_far) seq
-  !$acc data copy(f) copyin(ptot, qe, coord, iorbs, nat) present(nij, nstart, near)
+  !$acc data copyin(qe, coord, iorbs, nat) present(nij, nstart, near) deviceptr(f, ptot)
   !$acc parallel loop gang vector_length(128) private(na, d, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, sm)
   do a = 1, numat
     na = iorbs(a)
