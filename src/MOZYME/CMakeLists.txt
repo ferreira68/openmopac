@@ -19,7 +19,7 @@ set(src_list
     isitsc setupk chrge_for_MOZYME reorth set_up_MOZYME_arrays
     eimp vecprt_for_MOZYME outer2 compct cnvgz diagg
     kab_for_MOZYME bonds_for_MOZYME prtlmo density_for_MOZYME
-    addhb dipole_for_MOZYME local_for_MOZYME fock2z acc_fock_mozyme local2
+    addhb dipole_for_MOZYME local_for_MOZYME fock2z acc_fock_mozyme acc_diagg_mozyme local2
     helecz scfcri MOZYME_C epseta iter_for_MOZYME pinout
     denrot_for_MOZYME fock1_for_MOZYME jab_for_MOZYME hybrid
     hcore_for_MOZYME tidy makvec selmos diagg2 mlmo

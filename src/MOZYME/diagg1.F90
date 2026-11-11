@@ -62,6 +62,13 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     double precision, save :: fref, oldlim, safety
     double precision :: cutoff, sum, sum1
     integer, external :: ijbo
+    integer, external :: acc_diagg_mode
+    integer :: gmode, ijcg
+    logical :: full, docc, gok
+    double precision :: sumtg, tinyg, tg
+    integer(8) :: gc0, gc1, grate
+    integer, allocatable :: ifmog(:,:), nfmog(:)
+    double precision, allocatable :: fmog(:), eigvg(:), eigsg(:)
     if (numcal /= icalcn) then
       icalcn = numcal
       fref = 10.0d0
@@ -117,6 +124,32 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     sumt = 0.d0
     ijc = 0
     tiny = 0.d0
+    !
+    !  GPU (OpenACC) version of the loops below, MOPAC_ACC_DIAGG set (acc_diagg_mozyme.F90).
+    !  "test": the GPU results go into copies and are compared with the CPU results at the end.
+    !
+    gmode = 0
+    gok = .false.
+    if (lijbo) gmode = acc_diagg_mode()
+    full = (idiagg <= 5 .or. Mod (idiagg, 2) == 0)
+    docc = .not. (idiagg > 2 .and. Mod (idiagg, 4) /= 0)
+    if (gmode == 1) then
+      call acc_diagg1_core (fao, nocc, nvir, eigv, eigs, nfmo, ifmo, ifmo, fmo, fmo_dim, nij, &
+           & cutoff, flim, oldlim, full, docc, ijc, sumt, tiny, gok)
+      if (gok) go to 900
+      sumt = 0.d0
+      ijc = 0
+      tiny = 0.d0
+    else if (gmode == 2) then
+      allocate (ifmog(2, fmo_dim), nfmog(nvir), fmog(fmo_dim), eigvg(nvir), eigsg(nocc))
+      nfmog(1:nvir) = nfmo(1:nvir)
+      call system_clock (gc0, grate)
+      call acc_diagg1_core (fao, nocc, nvir, eigvg, eigsg, nfmog, ifmog, ifmo, fmog, fmo_dim, nij, &
+           & cutoff, flim, oldlim, full, docc, ijcg, sumtg, tinyg, gok)
+      call system_clock (gc1)
+      tg = dble(gc1 - gc0)/dble(grate)
+      if (.not. full .and. gok) ifmog(:, 1:ijcg) = ifmo(:, 1:ijcg)
+    end if
     !
     !
     do i = 1, nvir
@@ -455,6 +488,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       end if
     end do
     !
+900 continue
     if (ijc == nij) then
       !
       !   THERE WAS NOT ENOUGH STORAGE TO HOLD ALL THE INTEGRALS.
@@ -481,6 +515,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       !  EVALUATE THE OCCUPIED ENERGY LEVELS
       !
         !
+      if (gmode /= 1 .or. .not. gok) then
       do i = 1, nocc
         !
           loopi = ncocc(i)
@@ -638,6 +673,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
           eigs(i) = sum
           !
       end do
+      end if
             oldlim = tiny * safety * 1.d-3
       fref = tiny ** 4
       if (times) then
@@ -645,5 +681,10 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       end if
     end if
 
+    if (gmode == 2) then
+      if (gok) call acc_diagg1_compare (nvir, nocc, eigv, eigvg, eigs, eigsg, docc, ijc, ijcg, ifmo, ifmog, fmo, fmog, &
+           & nfmo, nfmog, sumt, sumtg, tiny, tinyg, tg)
+      deallocate (ifmog, nfmog, fmog, eigvg, eigsg)
+    end if
     ovmax = tiny
 end subroutine diagg1

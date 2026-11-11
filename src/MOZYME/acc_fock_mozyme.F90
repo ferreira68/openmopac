@@ -31,6 +31,41 @@
 ! the largest difference to the output for every Fock build; any other value uses the GPU.
 ! Without OpenACC, acc_fock_mode returns 0 and the GPU routines are empty.
 
+module acc_mozyme_C
+! Device-side MOZYME data shared by the OpenACC routines (acc_fz2n, acc_diagg1_core): a copy of
+! nijbo, present on the device, refreshed when the geometry or the set of interactions changes.
+  implicit none
+  integer, allocatable :: nij(:,:)
+  integer :: key_numcal = -1, key_mpack = -1, key_numat = -1
+  integer :: nij_gen = 0   ! incremented on every rebuild; consumers compare with the generation they used
+contains
+  logical function acc_mozyme_sync()
+! Returns .true. if nij was (re)built on this call. Consumers that keep data derived from nij must
+! compare nij_gen with the generation they built for, since another consumer may have synced first.
+#ifdef _OPENACC
+    use molkst_C, only : numat, mpack, numcal
+    use MOZYME_C, only : nijbo
+#endif
+    acc_mozyme_sync = .false.
+#ifdef _OPENACC
+    if (numcal == key_numcal .and. mpack == key_mpack .and. numat == key_numat) return
+    if (allocated(nij)) then
+      !$acc exit data delete(nij)
+      deallocate (nij)
+    end if
+    call acc_update_nddo()
+    allocate (nij(numat, numat))
+    nij = nijbo(1:numat, 1:numat)
+    !$acc enter data copyin(nij)
+    key_numcal = numcal
+    key_mpack = mpack
+    key_numat = numat
+    nij_gen = nij_gen + 1
+    acc_mozyme_sync = .true.
+#endif
+  end function acc_mozyme_sync
+end module acc_mozyme_C
+
 integer function acc_fock_mode()
   implicit none
   integer, save :: mode = -1
@@ -55,29 +90,27 @@ end function acc_fock_mode
 
 subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord)
 #ifdef _OPENACC
-  use molkst_C, only : numat, mpack, numcal
-  use MOZYME_C, only : nijbo
+  use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
+  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync
 #endif
   implicit none
   double precision, intent(inout) :: f(*)
   double precision, intent(in) :: ptot(*), qe(*), coord(3,*)
   integer, intent(in) :: iorbs(*), nat(*)
 #ifdef _OPENACC
-  integer, save :: key_numcal = -1, key_mpack = -1, key_numat = -1, nnear = 0
-  integer, allocatable, save :: nstart(:), near(:), nij(:,:)
-  logical :: spi, spj
+  integer, save :: nnear = 0, my_gen = -1
+  integer, allocatable, save :: nstart(:), near(:)
+  logical :: spi, spj, rebuilt
   integer :: a, b, ii, jj, k
-  if (numcal /= key_numcal .or. mpack /= key_mpack .or. numat /= key_numat) then
-! New geometry or new set of interactions: rebuild the NDDO s,p neighbor lists (CSR) and
-! refresh the device copies of nijbo and the parameters.
+  rebuilt = acc_mozyme_sync()   ! separate statement: Fortran need not evaluate a function inside .or.
+  if (rebuilt .or. my_gen /= nij_gen) then
+! New geometry or new set of interactions: rebuild the NDDO s,p neighbor lists (CSR).
     if (allocated(nstart)) then
-      !$acc exit data delete(nstart, near, nij)
-      deallocate (nstart, near, nij)
+      !$acc exit data delete(nstart, near)
+      deallocate (nstart, near)
     end if
-    call acc_update_nddo()
-    allocate (nstart(numat + 1), nij(numat, numat))
-    nij = nijbo(1:numat, 1:numat)
+    allocate (nstart(numat + 1))
     nnear = 0
     do k = 1, 2
       if (k == 2) allocate (near(max(1, nnear)))
@@ -99,10 +132,8 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord)
       end do
     end do
     nstart(numat + 1) = nnear + 1
-    !$acc enter data copyin(nstart, near, nij)
-    key_numcal = numcal
-    key_mpack = mpack
-    key_numat = numat
+    !$acc enter data copyin(nstart, near)
+    my_gen = nij_gen
   end if
   call acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
 #endif
