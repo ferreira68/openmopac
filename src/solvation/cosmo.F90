@@ -218,9 +218,8 @@ subroutine coscav
     integer, dimension(:), allocatable :: isort, ipsrs, nipsrs, nset, nipa, &
          & lipa
     integer, dimension(:, :), allocatable :: nn
-    maxrs = 70 * numat
-    allocate (rdat(numat), rsc(4, maxrs), tm(3, 3, numat), nn(3, numat), &
-         & isort(maxrs), ipsrs(maxrs), nipsrs(lenabc), nset(1082*numat), &
+    allocate (rdat(numat), tm(3, 3, numat), nn(3, numat), &
+         & nipsrs(lenabc), nset(1082*numat), &
          & nipa(numat), dirtm(3, 1082), finel(4, 500, 2))
     if (.not. allocated(srad)) allocate(srad(numat))
     if (.not. allocated(nar_csm))  allocate(nar_csm(lenabc + 1))
@@ -253,7 +252,12 @@ subroutine coscav
         end if
       end do
     end do
-    allocate (lipa(Max(1, ilipa)))
+   ! Size the neighbor-list work arrays from the count just made. The former fixed
+   ! maxrs = 70*numat assumed at most 70 neighbors per atom within ri + rj + 2*rsolv;
+   ! dense proteins with explicit hydrogens exceed that, which stopped the job with the
+   ! misleading message "Solvent radius too large - reduce RSOLV".
+    maxrs = max(70*numat, ilipa)
+    allocate (lipa(Max(1, maxrs)), rsc(4, maxrs), isort(maxrs), ipsrs(maxrs))
     fdiagr = 2.1d0 * Sqrt (pi)
     inset = 1
     ilipa = 0
@@ -518,7 +522,7 @@ subroutine coscav
         end do
       end if
   !  Check lipa size
-      if (ilipa >= 70*numat) then
+      if (ilipa >= maxrs) then
         exit
       end if
     end do
@@ -1157,6 +1161,10 @@ subroutine mkbmat
     integer :: i, ia, idel, iden, ips, ix, nati, iii
     double precision :: ddi, dist, qqi2, rm1, rm3, rm5, dsdi, dpdi, dddi, atmp
     double precision, dimension (3) :: xa
+   ! BMAT is allocated by COSCAV from the actual segment count; if COSCAV stopped
+   ! with an error it may not exist, and nothing must be written to it.
+    if (.not. allocated(bmat)) return
+    if (size(bmat, 2) < nps) return
    ! FILLING B - MATRIX
     iden = 0
     do i = 1, numat

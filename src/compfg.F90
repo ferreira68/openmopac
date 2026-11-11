@@ -198,6 +198,7 @@
           call coscavz(coord, nat)
         else
           call coscav
+          if (moperr) return   ! COSCAV allocates BMAT; do not call MKBMAT after it fails
           call mkbmat
         end if
         if (moperr) return
