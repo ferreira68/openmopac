@@ -43,6 +43,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     integer(8) :: gc0, gc1, grate
     double precision :: tg
     double precision, allocatable :: pg(:)
+    logical :: gok
     if (first) then
       first = .false.
       prnt = Index (keywrd, " DIAG ") /= 0
@@ -56,14 +57,19 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     gmode = 0
     if (mode == 0 .and. lijbo) gmode = acc_density_mode()
     if (gmode == 1) then
-      call acc_density_core (p, nclose_loc, .true.)
-      go to 900
+      call acc_density_core (p, nclose_loc, .true., gok)
+      if (gok) go to 900
+      gmode = 0                                ! not enabled or no device memory: CPU below
     else if (gmode == 2) then
       allocate (pg(mpack))
       call system_clock (gc0, grate)
-      call acc_density_core (pg, nclose_loc, .false.)
+      call acc_density_core (pg, nclose_loc, .false., gok)
       call system_clock (gc1)
       tg = dble(gc1 - gc0)/dble(grate)
+      if (.not. gok) then
+        deallocate (pg)
+        gmode = 0
+      end if
     end if
     if (mode == 0) then
       !

@@ -65,7 +65,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   use MOZYME_C, only : ncf, nce, nncf, nnce, ncocc, ncvir, icocc, icvir, cocc, cvir, iorbs, nfmo
   use common_arrays_C, only : nfirst, nlast, p
   use acc_mozyme_C, only : nij_d => nij, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_matches_device, &
-    fd_c, pd_c, fd_ok, pd_ok
+    fd_c, pd_c, fd_ok, pd_ok, allow_diagg, held_cand
   use common_arrays_C, only : fcom => f
   use iso_c_binding, only : c_f_pointer
   use chanel_C, only : iw
@@ -92,8 +92,18 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   double precision, pointer, contiguous :: fdev(:), pdev(:)
   logical :: fstale, pstale
   integer, save :: nstale = 0, nreuse = 0
-  ok = .true.
+  ok = .false.
   dummy = acc_mozyme_sync()
+  if (.not. allow_diagg) then           ! not enabled, or not enough device memory: CPU
+    if (allocated(ci)) then
+      !$acc exit data delete(ci, cj, cl, cv)
+      deallocate (ci, cj, cl, cv)
+      capsave = 0
+      held_cand = 0
+    end if
+    return
+  end if
+  ok = .true.
 ! F and P on the device: reuse the buffers left by the GPU Fock build if they hold the current
 ! common_arrays f and p (checked by flag, address and a sampled comparison); otherwise copy.
   if (fd_ok .and. pd_ok .and. allocated(fcom)) then
@@ -119,7 +129,10 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     fd_ok = .false.
   end if
   if (.not. fd_ok) then
-    call acc_mozyme_buffers(mpack)
+    if (.not. acc_mozyme_buffers(mpack)) then
+      ok = .false.
+      return
+    end if
     call acc_to_device(fd_c, fao, mpack)
     call acc_to_device(pd_c, p, mpack)
   else
@@ -138,6 +151,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     allocate (ci(cap), cj(cap), cl(cap), cv(cap))
     !$acc enter data create(ci, cj, cl, cv)
     capsave = cap
+    held_cand = 20_8*int(cap, 8)
   end if
   nlist = 0
   if (.not. full) nlist = min(sum(nfmo(1:nvir)), nij)

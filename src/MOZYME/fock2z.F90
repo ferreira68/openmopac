@@ -678,7 +678,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !      & qdenet, qscnet, gden, qscat
 
      use linear_cosmo, only: addfckz
-    use acc_mozyme_C, only : fd_ok, pd_ok
+    use acc_mozyme_C, only : fd_ok, pd_ok, allow_dgpu, n_dpairs
 
     implicit none
    !***********************************************************************
@@ -784,9 +784,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     end do
    !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: every atom pair on the device (acc_fz2n,
    !   called at the end, after the one-center and COSMO terms, so that the device copy of F is
-   !   complete); the pair loop below is then skipped (npass = 0). MOPAC_ACC_FOCK=test: the GPU terms
-   !   go into a copy of F made here, the CPU loop runs as usual, and the two are compared.
-   !   filter (1: only pairs with d orbitals, 2: all other pairs) is kept for diagnostics; 0 = all.
+   !   complete); the pair loop below is then skipped (npass = 0), or, if the device-memory plan
+   !   keeps the NDDO pairs with d orbitals on the CPU (allow_dgpu false), runs for those only
+   !   (filter = 1; 2 = all other pairs; 0 = all). MOPAC_ACC_FOCK=test: the GPU terms go into a copy
+   !   of F, the CPU loop computes all pairs into F (in two passes if d pairs are on the CPU, the copy
+   !   being taken after the first), and the two are compared.
     p_on_device = pd_ok        ! set by the GPU density build if the device copy of P is current
     fd_ok = .false.
     pd_ok = .false.
@@ -801,15 +803,32 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     end if
     if (acc_mode == 1) then
       npass = 0
+      if (n_dpairs > 0 .and. .not. allow_dgpu) then
+        npass = 1
+        filter = 1
+      end if
     else if (acc_mode == 2) then
       allocate (fg(mpack))
+      if (n_dpairs > 0 .and. .not. allow_dgpu) then
+        npass = 2
+        filter = 1
+      else
+        fg(1:mpack) = f(1:mpack)
+        call system_clock (c0, crate)
+        call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false., .false., .false., acc_ok)
+        call system_clock (c1)
+        tg = dble(c1 - c0)/dble(crate)
+      end if
+    end if
+    do pass = 1, npass
+    if (pass == 2) then
       fg(1:mpack) = f(1:mpack)
       call system_clock (c0, crate)
       call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false., .false., .false., acc_ok)
       call system_clock (c1)
       tg = dble(c1 - c0)/dble(crate)
+      filter = 2
     end if
-    do pass = 1, npass
     kr = 0
     ired = 1
     do ii = 1, numat

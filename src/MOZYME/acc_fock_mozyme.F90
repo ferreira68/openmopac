@@ -40,14 +40,39 @@ module acc_mozyme_C
 !   at any time without leaving a stale device mapping. fd_ok / pd_ok say that fd / pd hold the
 !   current common_arrays f / p: set by acc_fz2n after a complete Fock build, cleared at the start
 !   of every fz2n call and after diagg1 has used them (the density changes after diagg1).
-  use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long
+! - pacc: the fixed-point accumulator of the GPU density build (length mpack, 64-bit integers).
+!
+! Device memory plan (acc_mozyme_plan, at every rebuild of nij): the buffers above are released,
+! the free device memory is queried, the memory each GPU path needs is computed from mpack, numat,
+! the number of NDDO pairs and the LMO array sizes, and the largest set of the requested paths
+! that fits (with headroom) is enabled, shedding first the density (its accumulator), then diagg1,
+! then the Fock build; whatever is not enabled runs on the CPU. The decision is written to the
+! output. MOPAC_ACC_MEM_LIMIT (bytes, or with suffix MB/GB) caps the memory the plan may use, to
+! test the fallbacks on a large card. A failed acc_malloc later disables the GPU paths (CPU from
+! then on) instead of stopping the program.
+!
+! Local memory: CUDA reserves a kernel's per-thread stack for every thread slot of the device
+! (SMs x maximum resident threads per SM), whatever the launch size, and keeps the reservation.
+! The general rotate (NDDO pairs with d orbitals) needs 71,168 bytes per thread, rotate_sp
+! 6,720 (Nsight Compute, "Stack Size", nvfortran 26.9, this code); on an RTX 5090 Laptop (82 SMs x
+! 1,536) the d-pair kernel alone reserves 8.4 GB. The plan includes this term; the first d-pair
+! launch measures the actual reservation and reports it if it differs from the prediction by
+! more than 10 % (e.g. after a code change that alters the stack).
+! Shedding order, by benefit per byte: d pairs to the CPU (stack reservation), then the density
+! (accumulator), then diagg1, then the Fock build.
+  use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long, c_int, c_char, c_funptr
   implicit none
   integer, allocatable :: nij(:,:)
   integer :: key_numcal = -1, key_mpack = -1, key_numat = -1
   integer :: nij_gen = 0   ! incremented on every rebuild; consumers compare with the generation they used
-  type(c_ptr) :: fd_c = c_null_ptr, pd_c = c_null_ptr
-  integer :: dev_len = 0
+  type(c_ptr) :: fd_c = c_null_ptr, pd_c = c_null_ptr, pacc_c = c_null_ptr
+  integer :: dev_len = 0, pacc_len = 0
   logical :: fd_ok = .false., pd_ok = .false.
+  logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false., allow_dgpu = .false.
+  integer(8), parameter :: stack_rotate = 71168_8, stack_rotate_sp = 6720_8
+  integer(8) :: lmem_sp = 0, lmem_d = 0, lmem_held = 0   ! predicted reservations; largest triggered so far
+  integer :: n_dpairs = 0                                 ! NDDO pairs with d orbitals (set by acc_fz2n)
+  integer(8) :: held_lists = 0, held_cand = 0   ! device bytes held by acc_fz2n's pair lists, diagg1's buffers
   interface
     type(c_ptr) function c_acc_malloc(bytes) bind(C, name="acc_malloc")
       import :: c_ptr, c_long_long
@@ -67,24 +92,285 @@ module acc_mozyme_C
       type(c_ptr), value :: host, dev
       integer(c_long_long), value :: bytes
     end subroutine c_acc_memcpy_from_device
+    integer(c_size_t) function c_acc_get_property(devnum, devtype, property) bind(C, name="acc_get_property")
+! OpenACC 2.6 API (openacc.h): acc_device_nvidia = 4; acc_property_memory = 1, acc_property_free_memory = 2.
+      import :: c_size_t, c_int
+      integer(c_int), value :: devnum, devtype, property
+    end function c_acc_get_property
+    integer(c_int) function c_acc_get_device_num(devtype) bind(C, name="acc_get_device_num")
+      import :: c_int
+      integer(c_int), value :: devtype
+    end function c_acc_get_device_num
+    type(c_ptr) function c_dlopen(name, flag) bind(C, name="dlopen")
+      import :: c_ptr, c_char, c_int
+      character(kind=c_char), dimension(*) :: name
+      integer(c_int), value :: flag
+    end function c_dlopen
+    type(c_funptr) function c_dlsym(handle, name) bind(C, name="dlsym")
+      import :: c_ptr, c_funptr, c_char
+      type(c_ptr), value :: handle
+      character(kind=c_char), dimension(*) :: name
+    end function c_dlsym
+  end interface
+  abstract interface
+    integer(c_int) function cu_device_get(device, ordinal) bind(C)     ! CUresult cuDeviceGet(CUdevice*, int)
+      import :: c_int
+      integer(c_int) :: device
+      integer(c_int), value :: ordinal
+    end function cu_device_get
+    integer(c_int) function cu_device_get_attribute(pi, attrib, device) bind(C)  ! cuDeviceGetAttribute(int*, attr, CUdevice)
+      import :: c_int
+      integer(c_int) :: pi
+      integer(c_int), value :: attrib, device
+    end function cu_device_get_attribute
   end interface
 contains
-  subroutine acc_mozyme_buffers(n)
-! Makes fd and pd hold at least n doubles.
+  logical function acc_mozyme_buffers(n)
+! Makes fd and pd hold at least n doubles. On failure the GPU paths are disabled (.false.).
     use iso_c_binding, only : c_associated
     integer, intent(in) :: n
+    acc_mozyme_buffers = .false.
 #ifdef _OPENACC
+    acc_mozyme_buffers = .true.
     if (n <= dev_len) return
     if (c_associated(fd_c)) call c_acc_free(fd_c)
     if (c_associated(pd_c)) call c_acc_free(pd_c)
+    fd_c = c_null_ptr
+    pd_c = c_null_ptr
+    dev_len = 0
+    fd_ok = .false.
+    pd_ok = .false.
     fd_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
     pd_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
-    if (.not. c_associated(fd_c) .or. .not. c_associated(pd_c)) stop 'acc_mozyme_buffers: acc_malloc failed'
+    if (.not. c_associated(fd_c) .or. .not. c_associated(pd_c)) then
+      call acc_mozyme_give_up('allocating the device F and P buffers')
+      acc_mozyme_buffers = .false.
+      return
+    end if
     dev_len = n
+#endif
+  end function acc_mozyme_buffers
+
+  logical function acc_mozyme_pacc(n)
+! Makes the density accumulator hold at least n 64-bit integers. On failure the GPU density is disabled.
+    use iso_c_binding, only : c_associated
+    use chanel_C, only : iw
+    integer, intent(in) :: n
+    acc_mozyme_pacc = .false.
+#ifdef _OPENACC
+    acc_mozyme_pacc = .true.
+    if (n <= pacc_len) return
+    if (c_associated(pacc_c)) call c_acc_free(pacc_c)
+    pacc_len = 0
+    pacc_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
+    if (.not. c_associated(pacc_c)) then
+      pacc_c = c_null_ptr
+      allow_dens = .false.
+      write (iw, '(a)') ' ACC MOZYME: device memory exhausted allocating the density accumulator; density on the CPU'
+      acc_mozyme_pacc = .false.
+      return
+    end if
+    pacc_len = n
+#endif
+  end function acc_mozyme_pacc
+
+  subroutine acc_mozyme_give_up(what)
+! A device allocation failed: release what this module holds and run every MOZYME step on the CPU.
+    use iso_c_binding, only : c_associated
+    use chanel_C, only : iw
+    character(len=*), intent(in) :: what
+#ifdef _OPENACC
+    call acc_mozyme_release()
+    allow_fock = .false.
+    allow_diagg = .false.
+    allow_dens = .false.
+    write (iw, '(3a)') ' ACC MOZYME: device memory exhausted ', what, '; MOZYME continues on the CPU'
+#endif
+  end subroutine acc_mozyme_give_up
+
+  subroutine acc_mozyme_release()
+! Frees the device buffers owned by this module (fd, pd, pacc).
+    use iso_c_binding, only : c_associated
+#ifdef _OPENACC
+    if (c_associated(fd_c)) call c_acc_free(fd_c)
+    if (c_associated(pd_c)) call c_acc_free(pd_c)
+    if (c_associated(pacc_c)) call c_acc_free(pacc_c)
+    fd_c = c_null_ptr
+    pd_c = c_null_ptr
+    pacc_c = c_null_ptr
+    dev_len = 0
+    pacc_len = 0
     fd_ok = .false.
     pd_ok = .false.
 #endif
-  end subroutine acc_mozyme_buffers
+  end subroutine acc_mozyme_release
+
+  integer(8) function acc_thread_slots(devnum)
+! Number of SMs x maximum resident threads per SM of CUDA device devnum, from the driver API
+! (libcuda, loaded with dlopen so that no link dependency is added), or 0 if unavailable.
+    use iso_c_binding, only : c_associated, c_f_procpointer, c_null_char
+    integer, intent(in) :: devnum
+    type(c_ptr) :: h
+    type(c_funptr) :: fp1, fp2
+    procedure(cu_device_get), pointer :: get_dev
+    procedure(cu_device_get_attribute), pointer :: get_attr
+    integer(c_int) :: dev, nsm, nthr
+    acc_thread_slots = 0
+#ifdef _OPENACC
+    h = c_dlopen('libcuda.so.1'//c_null_char, 2_c_int)        ! RTLD_NOW
+    if (.not. c_associated(h)) return
+    fp1 = c_dlsym(h, 'cuDeviceGet'//c_null_char)
+    fp2 = c_dlsym(h, 'cuDeviceGetAttribute'//c_null_char)
+    if (.not. c_associated(fp1) .or. .not. c_associated(fp2)) return
+    call c_f_procpointer(fp1, get_dev)
+    call c_f_procpointer(fp2, get_attr)
+    if (get_dev(dev, int(devnum, c_int)) /= 0) return
+    if (get_attr(nsm, 16_c_int, dev) /= 0) return               ! CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
+    if (get_attr(nthr, 39_c_int, dev) /= 0) return              ! CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR
+    acc_thread_slots = int(nsm, 8)*int(nthr, 8)
+#endif
+  end function acc_thread_slots
+
+  integer(8) function acc_free_memory()
+! Free device memory in bytes (OpenACC acc_get_property, acc_property_free_memory).
+    acc_free_memory = 0
+#ifdef _OPENACC
+    acc_free_memory = int(c_acc_get_property(c_acc_get_device_num(4_c_int), 4_c_int, 2_c_int), 8)
+#endif
+  end function acc_free_memory
+
+  integer(8) function acc_mem_limit()
+! MOPAC_ACC_MEM_LIMIT in bytes (suffix KB, MB or GB allowed), or -1 if not set.
+    character(len=32) :: env
+    integer :: stat, l, ios
+    integer(8) :: mult
+    double precision :: x
+    acc_mem_limit = -1
+    call get_environment_variable("MOPAC_ACC_MEM_LIMIT", env, status=stat)
+    if (stat /= 0) return
+    env = adjustl(env)
+    l = len_trim(env)
+    mult = 1
+    if (l > 2) then
+      if (env(l-1:l) == 'GB' .or. env(l-1:l) == 'gb') then
+        mult = 1024_8**3
+        l = l - 2
+      else if (env(l-1:l) == 'MB' .or. env(l-1:l) == 'mb') then
+        mult = 1024_8**2
+        l = l - 2
+      else if (env(l-1:l) == 'KB' .or. env(l-1:l) == 'kb') then
+        mult = 1024_8
+        l = l - 2
+      end if
+    end if
+    read (env(1:l), *, iostat=ios) x
+    if (ios == 0) acc_mem_limit = int(x*dble(mult), 8)
+  end function acc_mem_limit
+
+  subroutine acc_mozyme_plan()
+! Decides which of the requested GPU paths fit in device memory (see the module header).
+    use molkst_C, only : numat, mpack
+    use MOZYME_C, only : nijbo, iorbs, cocc, cvir, icocc, icvir, fmo_dim
+    use chanel_C, only : iw
+    integer, external :: acc_fock_mode, acc_diagg_mode, acc_density_mode
+    logical :: want_fock, want_diagg, want_dens, f, g, d, dg
+    integer(8) :: free, total, avail, limit, headroom, b_nij, b_fp, b_pacc, b_lists, b_cand, b_lmo_g, b_lmo_d, slots
+    integer(8) :: npair, npair_d, lcocc, lcvir, licocc, licvir
+    integer :: i, j, dev, k
+    double precision, parameter :: gb = 1024.d0**3
+    character(len=64) :: enabled
+    character(len=8) :: lev
+    integer :: k0, stat
+#ifdef _OPENACC
+    want_fock = acc_fock_mode() > 0
+    want_diagg = acc_diagg_mode() > 0
+    want_dens = acc_density_mode() > 0
+    allow_fock = .false.
+    allow_diagg = .false.
+    allow_dens = .false.
+    allow_dgpu = .false.
+    if (.not. (want_fock .or. want_diagg .or. want_dens)) return
+    call acc_mozyme_release()
+    dev = c_acc_get_device_num(4_c_int)
+    total = int(c_acc_get_property(int(dev, c_int), 4_c_int, 1_c_int), 8)
+    free = int(c_acc_get_property(int(dev, c_int), 4_c_int, 2_c_int), 8)
+    slots = acc_thread_slots(dev)
+    if (slots == 0) slots = 200_8*2048_8          ! unknown: assume a very large device (conservative)
+    avail = free + held_lists + held_cand      ! the stack reservation already held is credited in need()
+    limit = acc_mem_limit()
+    if (limit >= 0) avail = min(avail, limit)
+    headroom = 256_8*1024_8**2 + total/20
+! Sizes, in bytes
+    npair = 0
+    npair_d = 0
+    do i = 2, numat
+      if (iorbs(i) == 0) cycle
+      do j = 1, i - 1
+        if (iorbs(j) == 0 .or. nijbo(i, j) < 0) cycle
+        npair = npair + 1
+        if (iorbs(i) > 5 .or. iorbs(j) > 5) npair_d = npair_d + 1
+      end do
+    end do
+    lcocc = 0; lcvir = 0; licocc = 0; licvir = 0
+    if (allocated(cocc)) lcocc = size(cocc, kind=8)
+    if (allocated(cvir)) lcvir = size(cvir, kind=8)
+    if (allocated(icocc)) licocc = size(icocc, kind=8)
+    if (allocated(icvir)) licvir = size(icvir, kind=8)
+    b_nij = 4_8*int(numat, 8)**2
+    b_fp = 16_8*int(mpack, 8)
+    b_pacc = 8_8*int(mpack, 8)
+    b_lists = 8_8*npair + 760_8*npair_d + 16_8*numat
+    b_cand = 30_8*max(1000000_8, 2_8*int(fmo_dim, 8))     ! candidate buffer (20 bytes each) plus growth
+    b_lmo_g = 16_8*(lcocc + lcvir) + 24_8*(licocc + licvir)
+    b_lmo_d = 8_8*lcocc + 8_8*licocc
+    lmem_sp = stack_rotate_sp*slots
+    lmem_d = stack_rotate*slots
+! Levels: 1 everything; 2 d pairs on the CPU; 3 no density; 4 Fock only; 5 nothing.
+! MOPAC_ACC_MEM_LEVEL (testing) starts the search at a lower level.
+    k0 = 1
+    call get_environment_variable("MOPAC_ACC_MEM_LEVEL", lev, status=stat)
+    if (stat == 0) then
+      read (lev, *, iostat=stat) k0
+      if (stat /= 0 .or. k0 < 1 .or. k0 > 5) k0 = 1
+    end if
+    do k = k0, 5
+      f = want_fock .and. k <= 4
+      dg = f .and. npair_d > 0 .and. k == 1
+      d = want_dens .and. k <= 2
+      g = want_diagg .and. k <= 3
+      if (need() <= avail - headroom) exit
+    end do
+    allow_fock = f
+    allow_diagg = g
+    allow_dens = d
+    allow_dgpu = dg
+    enabled = ''
+    if (allow_fock .and. (allow_dgpu .or. npair_d == 0)) enabled = trim(enabled)//' Fock'
+    if (allow_fock .and. .not. (allow_dgpu .or. npair_d == 0)) enabled = trim(enabled)//' Fock(d pairs on CPU)'
+    if (allow_diagg) enabled = trim(enabled)//' DIAGG1'
+    if (allow_dens) enabled = trim(enabled)//' density'
+    if (len_trim(enabled) == 0) enabled = ' none (all on the CPU)'
+    write (iw, '(a,f7.3,a,f7.3,a)', advance='no') ' ACC MOZYME: device memory free ', dble(free)/gb, ' of ', &
+      dble(total)/gb, ' GB'
+    if (limit >= 0) write (iw, '(a,f7.3,a)', advance='no') ' (MOPAC_ACC_MEM_LIMIT ', dble(limit)/gb, ' GB)'
+    if (k0 > 1) write (iw, '(a,i0,a)', advance='no') ' (MOPAC_ACC_MEM_LEVEL ', k0, ')'
+    write (iw, '(a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,i0,a)') '; needed (GB): Fock ', &
+      dble(b_nij + b_fp + b_lists + lmem_sp)/gb, ', +d pairs ', dble(lmem_d - lmem_sp)/gb, ', +DIAGG1 ', &
+      dble(b_cand + b_lmo_g)/gb, ', +density ', dble(b_pacc + b_lmo_d)/gb, ', headroom ', dble(headroom)/gb, &
+      ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
+    write (iw, '(a,i0,2a)') ' ACC MOZYME: level ', k, '; GPU paths enabled:', trim(enabled)
+    flush (iw)
+#endif
+  contains
+    integer(8) function need()
+      need = 0
+      if (f .or. g .or. d) need = b_nij + b_fp
+      if (f) need = need + b_lists + max(lmem_sp, merge(lmem_d, 0_8, dg)) - min(lmem_held, max(lmem_sp, &
+        merge(lmem_d, 0_8, dg)))
+      if (g) need = need + b_cand + b_lmo_g
+      if (d) need = need + b_pacc + b_lmo_d
+    end function need
+  end subroutine acc_mozyme_plan
 
   logical function acc_matches_device(dev, a, n, rtol)
 ! Compares 32 elements of a, spread over 1..n, with the device buffer dev, to relative tolerance
@@ -154,10 +440,13 @@ contains
       !$acc exit data delete(nij)
       deallocate (nij)
     end if
+    call acc_mozyme_plan()
     call acc_update_nddo()
     allocate (nij(numat, numat))
     nij = nijbo(1:numat, 1:numat)
-    !$acc enter data copyin(nij)
+    if (allow_fock .or. allow_diagg .or. allow_dens) then
+      !$acc enter data copyin(nij)
+    end if
     key_numcal = numcal
     key_mpack = mpack
     key_numat = numat
@@ -201,7 +490,8 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
   use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
-    fd_c, pd_c, fd_ok, pd_ok, acc_matches_device
+    fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_dgpu, n_dpairs, lmem_sp, lmem_d, &
+    lmem_held, acc_free_memory
   use iso_c_binding, only : c_f_pointer
   use common_arrays_C, only : fcom => f, pcom => p
   use chanel_C, only : iw
@@ -215,6 +505,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 #ifdef _OPENACC
   logical :: p_reuse
   integer, save :: nreuse = 0
+  integer(8) :: free0, drop
   double precision, pointer, contiguous :: fdev(:), pdev(:)
   integer, save :: nnear = 0, my_gen = -1, nd = 0
   integer, allocatable, save :: nstart(:), near(:)
@@ -227,13 +518,17 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   integer, allocatable :: dtmp(:)
   logical :: spi, spj, rebuilt
   integer :: a, b, ii, jj, k
+  supported = .false.
   rebuilt = acc_mozyme_sync()   ! separate statement: Fortran need not evaluate a function inside .or.
-  if (rebuilt .or. my_gen /= nij_gen) then
+  if ((rebuilt .or. my_gen /= nij_gen .or. .not. allow_fock) .and. allocated(nstart)) then
+    !$acc exit data delete(nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
+    deallocate (nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
+    held_lists = 0
+    my_gen = -1
+  end if
+  if (.not. allow_fock) return            ! not enabled, or not enough device memory: CPU
+  if (my_gen /= nij_gen) then
 ! New geometry or new set of interactions: rebuild the NDDO s,p neighbor lists (CSR).
-    if (allocated(nstart)) then
-      !$acc exit data delete(nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
-      deallocate (nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
-    end if
     allocate (nstart(numat + 1))
     nnear = 0
     do k = 1, 2
@@ -302,11 +597,17 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
     deallocate (dtmp)
     if (unsupported) write (iw, '(a)') ' ACC FOCK: NDDO pairs of an unsupported kind; the GPU Fock build is not used'
     !$acc enter data copyin(nstart, near, dpi, dpj, dstart, dlist) create(cdi, cdj)
+    n_dpairs = nd
+    held_lists = 4_8*(size(nstart, kind=8) + size(near, kind=8) + size(dpi, kind=8) + size(dpj, kind=8) + &
+      size(dstart, kind=8) + size(dlist, kind=8)) + 8_8*(size(cdi, kind=8) + size(cdj, kind=8))
     my_gen = nij_gen
   end if
-  supported = .not. unsupported
-  if (prepare .or. unsupported) return
-  call acc_mozyme_buffers(mpack)
+  if (unsupported) return
+! The device buffers are allocated here, in the prepare call, so that a failure is known before
+! fz2n decides to skip its CPU pair loop.
+  if (.not. acc_mozyme_buffers(mpack)) return
+  supported = .true.
+  if (prepare) return
   call acc_to_device(fd_c, f, mpack)
   p_reuse = .false.
   if (p_on_device .and. allocated(pcom)) then
@@ -322,7 +623,22 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   call c_f_pointer(fd_c, fdev, [mpack])
   call c_f_pointer(pd_c, pdev, [mpack])
   call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
-  if (nd > 0) call acc_fz2n_dpairs(numat, mpack, nd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
+  lmem_held = max(lmem_held, lmem_sp)
+  if (nd > 0 .and. allow_dgpu) then
+    if (lmem_held < lmem_d) then
+! First launch of the d-pair kernel: measure the local-memory reservation it triggers.
+      free0 = acc_free_memory()
+      call acc_fz2n_dpairs(numat, mpack, nd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
+      drop = free0 - acc_free_memory()
+      write (iw, '(a,f6.2,a,f6.2,a)') ' ACC MOZYME: d-pair kernel stack reservation: predicted ', &
+        dble(lmem_d - lmem_held)/1024.d0**3, ' GB, measured ', dble(drop)/1024.d0**3, ' GB'
+      if (abs(dble(drop) - dble(lmem_d - lmem_held)) > 0.1d0*dble(lmem_d - lmem_held)) write (iw, '(a)') &
+        ' ACC MOZYME: WARNING: the stack reservation differs from the prediction by more than 10 %; update stack_rotate'
+      lmem_held = lmem_d
+    else
+      call acc_fz2n_dpairs(numat, mpack, nd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
+    end if
+  end if
   call acc_from_device(f, fd_c, mpack)
   fd_ok = .false.
   pd_ok = .false.

@@ -50,52 +50,43 @@ integer function acc_density_mode()
   acc_density_mode = mode
 end function acc_density_mode
 
-subroutine acc_density_core(p, nclose, resident)
+subroutine acc_density_core(p, nclose, resident, ok)
 ! Full density matrix (mode 0) of the first nclose occupied LMOs into p(1:mpack).
 ! If resident, p is common_arrays p, and pd is marked as holding it.
+! ok = .false.: not enabled or not enough device memory; p is unchanged and the CPU must do it.
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
   use MOZYME_C, only : ncf, nncf, ncocc, icocc, cocc, iorbs
-  use acc_mozyme_C, only : nij, acc_mozyme_sync, acc_mozyme_buffers, acc_from_device, pd_c, pd_ok, fd_ok
+  use acc_mozyme_C, only : nij, acc_mozyme_sync, acc_mozyme_buffers, acc_mozyme_pacc, acc_from_device, pd_c, pd_ok, &
+    fd_ok, pacc_c, allow_dens
   use common_arrays_C, only : pcom => p
-  use iso_c_binding, only : c_f_pointer, c_ptr, c_associated, c_null_ptr, c_long_long
+  use iso_c_binding, only : c_f_pointer
 #endif
   implicit none
   integer, intent(in) :: nclose
   double precision, intent(inout) :: p(*)
   logical, intent(in) :: resident
+  logical, intent(out) :: ok
 #ifdef _OPENACC
-  interface
-    type(c_ptr) function c_acc_malloc(bytes) bind(C, name="acc_malloc")
-      import :: c_ptr, c_long_long
-      integer(c_long_long), value :: bytes
-    end function c_acc_malloc
-    subroutine c_acc_free(dev) bind(C, name="acc_free")
-      import :: c_ptr
-      type(c_ptr), value :: dev
-    end subroutine c_acc_free
-  end interface
   double precision, pointer, contiguous :: pdev(:)
   integer(8), pointer, contiguous :: pacc(:)
-  type(c_ptr), save :: acc_c = c_null_ptr
-  integer, save :: acc_len = 0
   logical :: dummy
+  ok = .false.
   dummy = acc_mozyme_sync()
-  call acc_mozyme_buffers(mpack)
-  if (mpack > acc_len) then
-    if (c_associated(acc_c)) call c_acc_free(acc_c)
-    acc_c = c_acc_malloc(int(mpack, c_long_long)*8_c_long_long)
-    if (.not. c_associated(acc_c)) stop 'acc_density_core: acc_malloc failed'
-    acc_len = mpack
-  end if
+  if (.not. allow_dens) return          ! not enabled, or not enough device memory: CPU
+  if (.not. acc_mozyme_buffers(mpack)) return
+  if (.not. acc_mozyme_pacc(mpack)) return
+  ok = .true.
   call c_f_pointer(pd_c, pdev, [mpack])
-  call c_f_pointer(acc_c, pacc, [mpack])
+  call c_f_pointer(pacc_c, pacc, [mpack])
   pd_ok = .false.
   fd_ok = .false.
   call acc_density_kernels(numat, mpack, nclose, size(icocc), size(cocc), nij, iorbs, ncf, nncf, ncocc, icocc, &
     cocc, pacc, pdev)
   call acc_from_device(p, pd_c, mpack)
   if (resident .and. allocated(pcom)) pd_ok = (loc(p(1)) == loc(pcom(1)))
+#else
+  ok = .false.
 #endif
 end subroutine acc_density_core
 
