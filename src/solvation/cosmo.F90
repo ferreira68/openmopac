@@ -194,16 +194,17 @@ subroutine coscav
    ! SURFACE (SAS)
    !
    !***********************************************************************
-    use molkst_C, only : numat
+    use molkst_C, only : numat, lm61, mozyme, moperr
     use cosmo_C, only : lenabc, nps, area, isude, sude, &
        cosvol, rsolv, ioldcv, disex2, n0, dirvec, dirsm, srad, &
-       cosurf, amat, iatsp, nar_csm, nsetf, phinet, arat
+       cosurf, amat, bmat, iatsp, nar_csm, nsetf, phinet, arat
     use common_arrays_c, only : coord, nat
     use funcon_C, only : pi
     use chanel_C, only : iw
     implicit none
     integer :: i, i0, ik, ilipa, inset, ipm, ips, ix, j, jmax, jps, k, &
-   & l, nara, narea, nfl1, nfl2, niter, nps0, maxrs
+   & l, nara, narea, nfl1, nfl2, niter, nps0, maxrs, alloc_stat
+    integer(8) :: need_a
     double precision :: aa, d2, dist, dist1, dist2, dist3, fdiagr, r, ri, &
    & ri2, rj, rr, sininv, sp, spm, x1, x2, x3, x4, dists
     logical, dimension (10000) :: din ! Was 1082, but some calc'ns used more than 1082
@@ -541,6 +542,38 @@ subroutine coscav
       arat(i) = 0.d0
       rdat(i) = 0.d0
     end do
+   ! Allocate AMAT (packed nps*(nps+1)/2) and BMAT(lm61, nps) from the actual segment
+   ! count; reallocate only when a later geometry produces more segments.
+    if (.not. mozyme) then
+      if (nps > 65535) then
+        write(iw, '(/10x, a, i0, a)') "COSMO surface has ", nps, " segments; the packed Cholesky"
+        write(iw, '(10x, a)') "(DPPTRF, 32-bit indices) is limited to 65535. Use MOZYME or a smaller NSPA."
+        call mopend("COSMO surface has more than 65535 segments")
+        return
+      end if
+      need_a = (int(nps, 8)*(nps + 1))/2
+      if (allocated(amat)) then
+        if (size(amat, kind=8) < need_a) deallocate(amat)
+      end if
+      if (.not. allocated(amat)) then
+        allocate(amat(need_a), stat = alloc_stat)
+        if (alloc_stat /= 0) then
+          call memory_error("COSCAV (AMAT) in Cosmo")
+          return
+        end if
+      end if
+      if (allocated(bmat)) then
+        if (size(bmat, 1) < lm61 .or. size(bmat, 2) < nps) deallocate(bmat)
+      end if
+      if (.not. allocated(bmat)) then
+        allocate(bmat(lm61, nps), stat = alloc_stat)
+        if (alloc_stat /= 0) then
+          call memory_error("COSCAV (BMAT) in Cosmo")
+          return
+        end if
+      end if
+      if (moperr) return
+    end if
    ! FILLING AMAT
     do ips = 1, nps
       i = iatsp(ips)
@@ -1807,11 +1840,11 @@ subroutine cosini(l_print)
       return
     end if
     if (.not. mozyme) then
+!     AMAT and BMAT are no longer allocated here. Sizing them for the worst case,
+!     lenabc = nspa*numat segments, overflowed 32-bit sizes and needed ~200 GB for a
+!     ~5,000-atom protein, while the actual surface had ~4% of that many segments.
+!     They are now allocated in COSCAV from the actual segment count, NPS.
       allocate(nset(nppa*numat), stat = j)
-      allocate(bmat(lm61, lenabc), stat = i)
-      j = j + i
-      allocate(amat((lenabc*(lenabc + 1))/2), stat = i)
-      j = j + i
       if (j /= 0) then
         if (l_print) then
           write(line, '(a, i5, a)')"Data set '"//trim(jobnam)//"' exists, "
