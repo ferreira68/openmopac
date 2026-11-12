@@ -1294,7 +1294,7 @@ subroutine acc_fz_pair_sp(ii, jj, numat, mpack, f, ptot, iorbs, nat, coord, nij,
 ! block (ii, jj) of f.
   implicit none
   !$acc routine seq
-  !$acc routine(rotate_sp) seq
+  !$acc routine(rotate_sp_w) seq
   integer, intent(in) :: ii, jj, numat, mpack
   double precision, intent(inout) :: f(mpack)
   double precision, intent(in) :: ptot(mpack), coord(3, numat)
@@ -1329,8 +1329,8 @@ subroutine acc_fz_pair_sp(ii, jj, numat, mpack, f, ptot, iorbs, nat, coord, nij,
     & 72, 73, 75, 78, 82, 83, 85, 88, 92, 93, 95, 98, 64, 65, 66, 69, 74, 75, 76, 79, 84, 85, 86, &
     & 89, 94, 95, 96, 99, 67, 68, 69, 70, 77, 78, 79, 80, 87, 88, 89, 90, 97, 98, 99, 100], [16,16])
   integer :: ia, ja, di, dj, l, i, j, k, m, jk, kj, li
-  double precision :: w(100), e1b(10), e2a(10), enuc, p(16), sum, sumoff, sumdia
-  call rotate_sp(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, e1b, e2a, enuc)
+  double precision :: w(100), p(16), sum, sumoff, sumdia
+  call rotate_sp_w(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w)   ! w only: the Fock build needs no core terms
   ia = iorbs(ii)
   ja = iorbs(jj)
   di = nij(ii, ii)

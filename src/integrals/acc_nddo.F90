@@ -225,5 +225,31 @@ subroutine spd_integral_check()
   end do
   write (iw, '(/,a,i0,a,i0,a,es10.3)') ' SPD INTEGRAL CHECK: ', npair, ' ordered s,p-d atom pairs; ', nbad, &
     ' not bitwise equal to rotate; max |dW| ', dmax
+! rotate_sp_w (the integrals w only, for the GPU Fock build) against rotate, for every pair of s,p atoms
+  npair = 0
+  nbad = 0
+  dmax = 0.d0
+  do i = 2, numat
+    do j = 1, i - 1
+      spa = natorb(nat(i)) <= 4 .and. .not. dorbs(nat(i)) .and. iod(nat(i)) == 0
+      spb = natorb(nat(j)) <= 4 .and. .not. dorbs(nat(j)) .and. iod(nat(j)) == 0
+      if (.not. (spa .and. spb)) cycle
+      npair = npair + 1
+      kr = 1
+      call rotate(nat(i), nat(j), coord(1, i), coord(1, j), wloc, kr, e1b, e2a, enuc)
+      call rotate_sp_w(nat(i), nat(j), coord(1, i), coord(1, j), wspd)
+      li = natorb(nat(i))
+      lj = natorb(nat(j))
+      nw = ((li*(li + 1))/2)*((lj*(lj + 1))/2)
+      ok = .true.
+      do k2 = 1, nw
+        if (wspd(k2) /= wloc(k2)) ok = .false.
+        dmax = max(dmax, abs(wspd(k2) - wloc(k2)))
+      end do
+      if (.not. ok) nbad = nbad + 1
+    end do
+  end do
+  write (iw, '(a,i0,a,i0,a,es10.3)') ' SP_W INTEGRAL CHECK: ', npair, ' s,p atom pairs; ', nbad, &
+    ' not bitwise equal to rotate; max |dW| ', dmax
   flush (iw)
 end subroutine spd_integral_check

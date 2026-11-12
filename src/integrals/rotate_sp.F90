@@ -188,6 +188,94 @@
   call ccrep (ni, nj, r, enuc, gab)
   end subroutine rotatd_sp
 
+! rotate_sp_w: the two-electron integrals w of rotate_sp only, for the GPU Fock build, which does not
+! use the electron-nuclear terms (e1b, e2a: spcore, elenuc_sp) or the core-core repulsion (enuc: ccrep)
+! of the pair. The text is rotate_sp/rotatd_sp with those parts deleted; w does not depend on them
+! (reppd takes the distance before it is scaled for spcore), so w is bitwise the same as from rotate_sp,
+! with less work and less live state per thread. Further, to cut the per-pair scratch traffic: w is
+! accumulated in place (rotatd_sp accumulated a local ww and copied it to w in the same linear order),
+! v has its rows indexed by indx (tx_sp_w; at most 10 x 10 instead of 25 x 10), and logv is replaced
+! by testing v /= 0, where logv was set.
+  subroutine rotate_sp_w(ni, nj, ci, cj, w)
+  use mndod_C, only : indx, indexd
+  use parameters_C, only : natorb
+  !$acc routine seq
+  !$acc routine(reppd) seq
+  !$acc routine(rotmat_sp) seq
+  !$acc routine(tx_sp_w) seq
+  implicit none
+  integer, intent(in) :: ni, nj
+  double precision, intent(in) :: ci(3), cj(3)
+  double precision, intent(out) :: w(100)
+  double precision :: sp(3,3), pp(6,3,3), x(3), rij
+  integer, dimension(45) :: met
+  integer, dimension(34) :: ipos
+  integer :: limkl, kl, ii, kk, limij, istep, i, i1, j1, ij, jj, mm, k, l, iw, iminus, j, jw
+  double precision :: v(100), ri(22), rep(34)
+  double precision :: r, wrepp, cc, gab
+  data met/ 1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, &
+    4, 5, 5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 5*6/
+  data ipos/ 1, 5, 11, 12, 12, 2, 6, 13, 14, 14, 3, 8, 16, 18, 18, 7, 15, &
+    10, 20, 4, 9, 17, 19, 21, 7, 15, 10, 20, 22, 4, 9, 17, 21, 19/
+  x(1) = ci(1) - cj(1)                 ! as rotate_sp: coincident atoms give no integrals
+  x(2) = ci(2) - cj(2)
+  x(3) = ci(3) - cj(3)
+  rij = x(1)*x(1) + x(2)*x(2) + x(3)*x(3)
+  if (rij < 0.00002D0) then
+    w = 0.D0
+    return
+  end if
+  call rotmat_sp(nj, ni, ci, cj, r, sp, pp)
+  call reppd (ni, nj, r, ri, gab)
+  rep(:34) = ri(ipos)          ! reppd2 without d orbitals
+  ii = natorb(ni)
+  kk = natorb(nj)
+  if (ii*kk > 0) then
+    limij = indx(ii,ii)
+    limkl = indx(kk,kk)
+    istep = limkl*limij
+    w(:istep) = 0.0D0
+    call tx_sp_w (ii, kk, limij, rep, v, sp, pp)
+    do i1 = 1, ii
+      do j1 = 1, i1
+        ij = indexd(i1,j1)
+        jj = indx(i1,j1)
+        mm = met(jj)
+        do k = 1, kk
+          do l = 1, k
+            kl = indx(k,l)
+            wrepp = v(jj + (kl - 1)*limij)
+            if (wrepp == 0.d0) cycle         ! (was: .not. logv(ij,kl), set where v /= 0)
+            select case (mm)
+            case (1)
+              iw = ((indx(1,1)-1)*limkl + kl)
+              w(iw) = wrepp
+            case (2)
+              do i = 1, 3
+                iw = ((indx(i + 1,1)-1)*limkl + kl)
+                w(iw) = w(iw) + sp(i1-1,i)*wrepp
+              end do
+            case (3)
+              do i = 1, 3
+                cc = pp(i,i1-1,j1-1)
+                iw = ((indx(i + 1,i + 1)-1)*limkl + kl)
+                w(iw) = w(iw) + cc*wrepp
+                iminus = i - 1
+                if (iminus == 0) cycle
+                do j = 1, iminus
+                  cc = pp(1+i+j,i1-1,j1-1)
+                  iw = ((indx(i + 1,j + 1)-1)*limkl + kl)
+                  w(iw) = w(iw) + cc*wrepp
+                end do
+              end do
+            end select
+          end do
+        end do
+      end do
+    end do
+  end if
+  end subroutine rotate_sp_w
+
   subroutine rotmat_sp(nj, ni, coordi, coordj, r, sp, pp)
   !$acc routine seq
   implicit none
@@ -309,6 +397,61 @@
     end do
   end do
   end subroutine tx_sp
+
+  subroutine tx_sp_w(ii, kk, ldv, rep, v, sp, pp)
+  use mndod_C, only : indexd, indx, ind2
+  !$acc routine seq
+  implicit none
+  integer, intent(in) :: ii, kk, ldv
+  double precision, intent(in) :: rep(34)
+! tx_sp for rotate_sp_w: rows indexed by indx(i1,j1) (ldv = indx(ii,ii) rows, at most 10) instead of
+! indexd (up to 25); ind2 is still addressed with indexd. No logv: rotate_sp_w tests v /= 0 itself
+! (logv was set exactly where v /= 0).
+  double precision, intent(out) :: v(ldv,*)
+  double precision, intent(in) :: sp(3,3), pp(6,3,3)
+  integer, dimension(45) :: met
+  integer :: limkl, k, i1, j1, ij, k1, l1, kl, nd, ll, mm, l, ir
+  double precision :: wrepp
+  data met/ 1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, &
+    4, 5, 5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 5*6/
+  limkl = indx(kk,kk)
+  v(1:ldv,1:limkl) = 0.D0
+  do i1 = 1, ii
+    do j1 = 1, i1
+      ij = indexd(i1,j1)
+      ir = indx(i1,j1)
+      do k1 = 1, kk
+        do l1 = 1, k1
+          kl = indexd(k1,l1)
+          nd = ind2(ij,kl)
+          if (nd == 0) cycle
+          wrepp = rep(nd)
+          ll = indx(k1,l1)
+          mm = met(ll)
+          select case (mm)
+          case (1)
+            v(ir,1) = wrepp
+          case (2)
+            k = k1 - 1
+            v(ir,2) = v(ir,2) + sp(k,1)*wrepp
+            v(ir,4) = v(ir,4) + sp(k,2)*wrepp
+            v(ir,7) = v(ir,7) + sp(k,3)*wrepp
+          case (3)
+            k = k1 - 1
+            l = l1 - 1
+            v(ir,3) = v(ir,3) + pp(1,k,l)*wrepp
+            v(ir,6) = v(ir,6) + pp(2,k,l)*wrepp
+            v(ir,10) = v(ir,10) + pp(3,k,l)*wrepp
+            v(ir,5) = v(ir,5) + pp(4,k,l)*wrepp
+            v(ir,8) = v(ir,8) + pp(5,k,l)*wrepp
+            v(ir,9) = v(ir,9) + pp(6,k,l)*wrepp
+            cycle
+          end select
+        end do
+      end do
+    end do
+  end do
+  end subroutine tx_sp_w
 
   subroutine elenuc_sp(ia, ib, ja, jb, h, sp, pp, cored)
   use mndod_C, only : indpp
