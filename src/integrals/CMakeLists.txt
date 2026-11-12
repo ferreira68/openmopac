@@ -16,7 +16,7 @@
 #===============================================
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list 
-    acc_nddo rotate_sp
+    acc_nddo rotate_sp rotate_spd
     set h1elec diat kab ccrep hcore jab mndod_C
     rotate bfn mndod helect coe sp_two_electron
     solrot

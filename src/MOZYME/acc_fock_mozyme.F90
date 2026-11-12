@@ -45,21 +45,25 @@ module acc_mozyme_C
 ! Device memory plan (acc_mozyme_plan, at every rebuild of nij): the buffers above are released,
 ! the free device memory is queried, the memory each GPU path needs is computed from mpack, numat,
 ! the number of NDDO pairs and the LMO array sizes, and the largest set of the requested paths
-! that fits (with headroom) is enabled, shedding first the density (its accumulator), then diagg1,
-! then the Fock build; whatever is not enabled runs on the CPU. The decision is written to the
-! output. MOPAC_ACC_MEM_LIMIT (bytes, or with suffix MB/GB) caps the memory the plan may use, to
-! test the fallbacks on a large card. A failed acc_malloc later disables the GPU paths (CPU from
-! then on) instead of stopping the program.
+! that fits (with headroom) is enabled, shedding first the NDDO pairs with d orbitals (kernel stacks,
+! below), then the density (its accumulator), then diagg1, then the Fock build; whatever is not
+! enabled runs on the CPU. The decision is written to the output. MOPAC_ACC_MEM_LIMIT (bytes, or
+! with suffix KB/MB/GB) caps the memory the plan may use, and MOPAC_ACC_MEM_LEVEL (1-6) sets the
+! first level tried, to test the fallbacks on a large card. A failed acc_malloc later disables the
+! GPU paths (CPU from then on) instead of stopping the program.
 !
 ! Local memory: CUDA reserves a kernel's per-thread stack for every thread slot of the device
 ! (SMs x maximum resident threads per SM), whatever the launch size, and keeps the reservation.
-! The general rotate (NDDO pairs with d orbitals) needs 71,168 bytes per thread, rotate_sp
-! 6,720 (Nsight Compute, "Stack Size", nvfortran 26.9, this code); on an RTX 5090 Laptop (82 SMs x
-! 1,536) the d-pair kernel alone reserves 8.4 GB. The plan includes this term; the first d-pair
-! launch measures the actual reservation and reports it if it differs from the prediction by
-! more than 10 % (e.g. after a code change that alters the stack).
-! Shedding order, by benefit per byte: d pairs to the CPU (stack reservation), then the density
-! (accumulator), then diagg1, then the Fock build.
+! Per-thread stacks (Nsight Compute, "Stack Size", nvfortran 26.9, this code): rotate_sp (s,p
+! pairs) 6,720 bytes; rotate_spd (pairs with one s,p,d atom) 20,912; the general rotate
+! (pairs of two s,p,d atoms, "d,d") 71,168. On an RTX 5090 Laptop (82 SMs x 1,536) the d,d kernel
+! alone reserves 8.4 GB. The plan includes these terms; the first launch of each pair kernel
+! measures the actual reservation and reports it if it differs from the prediction by more than
+! 10 % (e.g. after a code change that alters the stack).
+! Levels (shedding order, by benefit per byte): 1 everything on the GPU; 2 d,d pairs on the CPU;
+! 3 all pairs with d orbitals on the CPU; 4 also the density; 5 also diagg1 (Fock only); 6 nothing.
+! Level 1 is considered only if there are at least min_dd_gpu d,d pairs: the d,d kernel reserves
+! gigabytes, and a few thousand d,d pairs cost the CPU little.
   use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long, c_int, c_char, c_funptr
   implicit none
   integer, allocatable :: nij(:,:)
@@ -68,10 +72,12 @@ module acc_mozyme_C
   type(c_ptr) :: fd_c = c_null_ptr, pd_c = c_null_ptr, pacc_c = c_null_ptr
   integer :: dev_len = 0, pacc_len = 0
   logical :: fd_ok = .false., pd_ok = .false.
-  logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false., allow_dgpu = .false.
-  integer(8), parameter :: stack_rotate = 71168_8, stack_rotate_sp = 6720_8
-  integer(8) :: lmem_sp = 0, lmem_d = 0, lmem_held = 0   ! predicted reservations; largest triggered so far
-  integer :: n_dpairs = 0                                 ! NDDO pairs with d orbitals (set by acc_fz2n)
+  logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false.
+  logical :: allow_sdgpu = .false., allow_ddgpu = .false.   ! s,p-d and d,d NDDO pairs on the GPU
+  integer(8), parameter :: stack_rotate = 71168_8, stack_rotate_sp = 6720_8, stack_rotate_spd = 20912_8
+  integer, parameter :: min_dd_gpu = 20000
+  integer(8) :: lmem_sp = 0, lmem_sd = 0, lmem_dd = 0, lmem_held = 0   ! predicted reservations; largest so far
+  integer :: n_sdpairs = 0, n_ddpairs = 0                 ! NDDO pairs of each kind with d orbitals (acc_fz2n)
   integer(8) :: held_lists = 0, held_cand = 0   ! device bytes held by acc_fz2n's pair lists, diagg1's buffers
   interface
     type(c_ptr) function c_acc_malloc(bytes) bind(C, name="acc_malloc")
@@ -125,6 +131,43 @@ module acc_mozyme_C
     end function cu_device_get_attribute
   end interface
 contains
+  logical function acc_sp_atom(z, io)
+! An atom (atomic number z, io orbitals) with an s or s,p basis and no d-orbital terms.
+    use parameters_C, only : dorbs, iod
+    integer, intent(in) :: z, io
+    acc_sp_atom = (io == 1 .or. io == 4) .and. .not. dorbs(z) .and. iod(z) == 0
+  end function acc_sp_atom
+
+  integer function acc_pair_class(za, ia, zb, ib)
+! Kind of an atom pair for the GPU Fock build, from the atomic numbers and orbital counts:
+! 0: both atoms s or s,p (rotate_sp); 1: one s,p,d atom with an s or s,p atom (rotate_spd);
+! 2: any other pair (general rotate on the GPU only in the d,d kernel).
+    integer, intent(in) :: za, ia, zb, ib
+    logical :: spa, spb
+    spa = acc_sp_atom(za, ia)
+    spb = acc_sp_atom(zb, ib)
+    if (spa .and. spb) then
+      acc_pair_class = 0
+    else if ((ia == 9 .and. spb) .or. (ib == 9 .and. spa)) then
+      acc_pair_class = 1
+    else
+      acc_pair_class = 2
+    end if
+  end function acc_pair_class
+
+  logical function acc_pair_on_gpu(za, ia, zb, ib)
+! Whether the GPU Fock build (as planned) computes this NDDO pair; if not, fz2n does it on the CPU.
+    integer, intent(in) :: za, ia, zb, ib
+    select case (acc_pair_class(za, ia, zb, ib))
+    case (0)
+      acc_pair_on_gpu = .true.
+    case (1)
+      acc_pair_on_gpu = allow_sdgpu
+    case default
+      acc_pair_on_gpu = allow_ddgpu
+    end select
+  end function acc_pair_on_gpu
+
   logical function acc_mozyme_buffers(n)
 ! Makes fd and pd hold at least n doubles. On failure the GPU paths are disabled (.false.).
     use iso_c_binding, only : c_associated
@@ -271,11 +314,12 @@ contains
 ! Decides which of the requested GPU paths fit in device memory (see the module header).
     use molkst_C, only : numat, mpack
     use MOZYME_C, only : nijbo, iorbs, cocc, cvir, icocc, icvir, fmo_dim
+    use common_arrays_C, only : nat
     use chanel_C, only : iw
     integer, external :: acc_fock_mode, acc_diagg_mode, acc_density_mode
-    logical :: want_fock, want_diagg, want_dens, f, g, d, dg
+    logical :: want_fock, want_diagg, want_dens, f, g, d, sdg, ddg
     integer(8) :: free, total, avail, limit, headroom, b_nij, b_fp, b_pacc, b_lists, b_cand, b_lmo_g, b_lmo_d, slots
-    integer(8) :: npair, npair_d, lcocc, lcvir, licocc, licvir
+    integer(8) :: npair, npair_d, npair_sd, npair_dd, lcocc, lcvir, licocc, licvir
     integer :: i, j, dev, k
     double precision, parameter :: gb = 1024.d0**3
     character(len=64) :: enabled
@@ -288,7 +332,8 @@ contains
     allow_fock = .false.
     allow_diagg = .false.
     allow_dens = .false.
-    allow_dgpu = .false.
+    allow_sdgpu = .false.
+    allow_ddgpu = .false.
     if (.not. (want_fock .or. want_diagg .or. want_dens)) return
     call acc_mozyme_release()
     dev = c_acc_get_device_num(4_c_int)
@@ -302,15 +347,22 @@ contains
     headroom = 256_8*1024_8**2 + total/20
 ! Sizes, in bytes
     npair = 0
-    npair_d = 0
+    npair_sd = 0
+    npair_dd = 0
     do i = 2, numat
       if (iorbs(i) == 0) cycle
       do j = 1, i - 1
         if (iorbs(j) == 0 .or. nijbo(i, j) < 0) cycle
         npair = npair + 1
-        if (iorbs(i) > 5 .or. iorbs(j) > 5) npair_d = npair_d + 1
+        select case (acc_pair_class(nat(i), iorbs(i), nat(j), iorbs(j)))
+        case (1)
+          npair_sd = npair_sd + 1
+        case (2)
+          npair_dd = npair_dd + 1
+        end select
       end do
     end do
+    npair_d = npair_sd + npair_dd
     lcocc = 0; lcvir = 0; licocc = 0; licvir = 0
     if (allocated(cocc)) lcocc = size(cocc, kind=8)
     if (allocated(cvir)) lcvir = size(cvir, kind=8)
@@ -324,40 +376,58 @@ contains
     b_lmo_g = 16_8*(lcocc + lcvir) + 24_8*(licocc + licvir)
     b_lmo_d = 8_8*lcocc + 8_8*licocc
     lmem_sp = stack_rotate_sp*slots
-    lmem_d = stack_rotate*slots
-! Levels: 1 everything; 2 d pairs on the CPU; 3 no density; 4 Fock only; 5 nothing.
-! MOPAC_ACC_MEM_LEVEL (testing) starts the search at a lower level.
+    lmem_sd = stack_rotate_spd*slots
+    lmem_dd = stack_rotate*slots
+! Levels (module header): 1 everything; 2 d,d pairs on the CPU; 3 all d pairs on the CPU; 4 no
+! density; 5 Fock only; 6 nothing. Level 1 only with at least min_dd_gpu d,d pairs.
+! MOPAC_ACC_MEM_LEVEL (testing) starts the search at the given level.
+! MOPAC_ACC_MEM_LEVEL=1 forces the d,d kernel even with fewer than min_dd_gpu d,d pairs.
     k0 = 1
+    if (npair_dd < min_dd_gpu) k0 = 2
     call get_environment_variable("MOPAC_ACC_MEM_LEVEL", lev, status=stat)
     if (stat == 0) then
       read (lev, *, iostat=stat) k0
-      if (stat /= 0 .or. k0 < 1 .or. k0 > 5) k0 = 1
+      if (stat /= 0 .or. k0 < 1 .or. k0 > 6) k0 = 1
     end if
-    do k = k0, 5
-      f = want_fock .and. k <= 4
-      dg = f .and. npair_d > 0 .and. k == 1
-      d = want_dens .and. k <= 2
-      g = want_diagg .and. k <= 3
+    do k = k0, 6
+      f = want_fock .and. k <= 5
+      ddg = f .and. npair_dd > 0 .and. k == 1
+      sdg = f .and. npair_sd > 0 .and. k <= 2
+      d = want_dens .and. k <= 3
+      g = want_diagg .and. k <= 4
       if (need() <= avail - headroom) exit
     end do
     allow_fock = f
     allow_diagg = g
     allow_dens = d
-    allow_dgpu = dg
+    allow_sdgpu = sdg
+    allow_ddgpu = ddg
     enabled = ''
-    if (allow_fock .and. (allow_dgpu .or. npair_d == 0)) enabled = trim(enabled)//' Fock'
-    if (allow_fock .and. .not. (allow_dgpu .or. npair_d == 0)) enabled = trim(enabled)//' Fock(d pairs on CPU)'
+    if (allow_fock) then
+      if ((allow_sdgpu .or. npair_sd == 0) .and. (allow_ddgpu .or. npair_dd == 0)) then
+        enabled = trim(enabled)//' Fock'
+      else if (allow_sdgpu .or. npair_sd == 0) then
+        enabled = trim(enabled)//' Fock(d,d pairs on CPU)'
+      else
+        enabled = trim(enabled)//' Fock(d pairs on CPU)'
+      end if
+    end if
     if (allow_diagg) enabled = trim(enabled)//' DIAGG1'
     if (allow_dens) enabled = trim(enabled)//' density'
     if (len_trim(enabled) == 0) enabled = ' none (all on the CPU)'
     write (iw, '(a,f7.3,a,f7.3,a)', advance='no') ' ACC MOZYME: device memory free ', dble(free)/gb, ' of ', &
       dble(total)/gb, ' GB'
     if (limit >= 0) write (iw, '(a,f7.3,a)', advance='no') ' (MOPAC_ACC_MEM_LIMIT ', dble(limit)/gb, ' GB)'
-    if (k0 > 1) write (iw, '(a,i0,a)', advance='no') ' (MOPAC_ACC_MEM_LEVEL ', k0, ')'
-    write (iw, '(a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,i0,a)') '; needed (GB): Fock ', &
-      dble(b_nij + b_fp + b_lists + lmem_sp)/gb, ', +d pairs ', dble(lmem_d - lmem_sp)/gb, ', +DIAGG1 ', &
-      dble(b_cand + b_lmo_g)/gb, ', +density ', dble(b_pacc + b_lmo_d)/gb, ', headroom ', dble(headroom)/gb, &
-      ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
+    if (stat == 0) write (iw, '(a,i0,a)', advance='no') ' (MOPAC_ACC_MEM_LEVEL ', k0, ')'
+    write (iw, '(a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,i0,a)') '; needed (GB): Fock ', &
+      dble(b_nij + b_fp + b_lists + lmem_sp)/gb, ', +s,p-d pairs ', dble(lmem_sd - lmem_sp)/gb, ', +d,d pairs ', &
+      dble(lmem_dd - lmem_sd)/gb, ', +DIAGG1 ', dble(b_cand + b_lmo_g)/gb, ', +density ', dble(b_pacc + b_lmo_d)/gb, &
+      ', headroom ', dble(headroom)/gb, ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
+    write (iw, '(a,i0,a,i0,a,i0)', advance='no') ' ACC MOZYME: NDDO pairs ', npair, ', of which s,p-d ', npair_sd, &
+      ', d,d ', npair_dd
+    if (npair_dd > 0 .and. npair_dd < min_dd_gpu .and. .not. allow_ddgpu) write (iw, '(a,i0,a)', advance='no') &
+      ' (fewer than ', min_dd_gpu, ': d,d pairs on the CPU)'
+    write (iw, '(a)') ''
     write (iw, '(a,i0,2a)') ' ACC MOZYME: level ', k, '; GPU paths enabled:', trim(enabled)
     flush (iw)
 #endif
@@ -365,12 +435,45 @@ contains
     integer(8) function need()
       need = 0
       if (f .or. g .or. d) need = b_nij + b_fp
-      if (f) need = need + b_lists + max(lmem_sp, merge(lmem_d, 0_8, dg)) - min(lmem_held, max(lmem_sp, &
-        merge(lmem_d, 0_8, dg)))
+      if (f) need = need + b_lists + lmem() - min(lmem_held, lmem())
       if (g) need = need + b_cand + b_lmo_g
       if (d) need = need + b_pacc + b_lmo_d
     end function need
+    integer(8) function lmem()
+! Local-memory reservation of the largest pair kernel the Fock build will launch.
+      lmem = lmem_sp
+      if (sdg) lmem = max(lmem, lmem_sd)
+      if (ddg) lmem = max(lmem, lmem_dd)
+    end function lmem
   end subroutine acc_mozyme_plan
+
+  subroutine acc_lmem_begin(predicted, free0)
+! Before a pair kernel's launch: if it will raise the local-memory reservation (predicted, bytes,
+! larger than what earlier kernels triggered), record the free memory so that acc_lmem_end can
+! measure the increase; otherwise free0 = -1.
+    integer(8), intent(in) :: predicted
+    integer(8), intent(out) :: free0
+    free0 = -1
+    if (lmem_held < predicted) free0 = acc_free_memory()
+  end subroutine acc_lmem_begin
+
+  subroutine acc_lmem_end(predicted, free0, what)
+! After the launch: report the measured increase of the reservation against the prediction, with a
+! warning if they differ by more than 10 % (then the stack constant for that kernel is out of date).
+    use chanel_C, only : iw
+    integer(8), intent(in) :: predicted, free0
+    character(len=*), intent(in) :: what
+    integer(8) :: drop, expect
+    if (free0 < 0) return
+    drop = free0 - acc_free_memory()
+    expect = predicted - lmem_held
+    write (iw, '(3a,f6.2,a,f6.2,a)') ' ACC MOZYME: ', what, ' kernel stack reservation: predicted ', &
+      dble(expect)/1024.d0**3, ' GB, measured ', dble(drop)/1024.d0**3, ' GB'
+    if (abs(dble(drop) - dble(expect)) > 0.1d0*dble(expect)) write (iw, '(3a)') &
+      ' ACC MOZYME: WARNING: the stack reservation differs from the prediction by more than 10 %; update the ', &
+      what, ' stack constant'
+    lmem_held = predicted
+  end subroutine acc_lmem_end
 
   logical function acc_matches_device(dev, a, n, rtol)
 ! Compares 32 elements of a, spread over 1..n, with the device buffer dev, to relative tolerance
@@ -490,8 +593,8 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
   use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
-    fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_dgpu, n_dpairs, lmem_sp, lmem_d, &
-    lmem_held, acc_free_memory
+    fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_sdgpu, allow_ddgpu, n_sdpairs, &
+    n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end
   use iso_c_binding, only : c_f_pointer
   use common_arrays_C, only : fcom => f, pcom => p
   use chanel_C, only : iw
@@ -505,13 +608,15 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 #ifdef _OPENACC
   logical :: p_reuse
   integer, save :: nreuse = 0
-  integer(8) :: free0, drop
+  integer(8) :: free0
+  integer :: c
   double precision, pointer, contiguous :: fdev(:), pdev(:)
-  integer, save :: nnear = 0, my_gen = -1, nd = 0
+  integer, save :: nnear = 0, my_gen = -1, nd = 0, nsd = 0, ndd = 0
   integer, allocatable, save :: nstart(:), near(:)
-! NDDO pairs that involve d orbitals: dpi > dpj, and per atom the list of those pairs (dlist,
-! +k: the atom is dpi(k); -k: the atom is dpj(k)), in increasing k.
-  integer, allocatable, save :: dpi(:), dpj(:), dstart(:), dlist(:)
+! NDDO pairs that involve d orbitals: dpi > dpj, their kind dcls (acc_pair_class: 1 s,p-d, 2 d,d),
+! the indices of each kind (isd, idd), and per atom the list of those pairs (dlist, +k: the atom is
+! dpi(k); -k: the atom is dpj(k)), in increasing k.
+  integer, allocatable, save :: dpi(:), dpj(:), dcls(:), isd(:), idd(:), dstart(:), dlist(:)
   double precision, allocatable, save :: cdi(:,:), cdj(:,:)
   logical, save :: unsupported = .false.
   integer :: kd, m
@@ -521,8 +626,8 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   supported = .false.
   rebuilt = acc_mozyme_sync()   ! separate statement: Fortran need not evaluate a function inside .or.
   if ((rebuilt .or. my_gen /= nij_gen .or. .not. allow_fock) .and. allocated(nstart)) then
-    !$acc exit data delete(nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
-    deallocate (nstart, near, dpi, dpj, dstart, dlist, cdi, cdj)
+    !$acc exit data delete(nstart, near, dpi, dpj, dcls, isd, idd, dstart, dlist, cdi, cdj)
+    deallocate (nstart, near, dpi, dpj, dcls, isd, idd, dstart, dlist, cdi, cdj)
     held_lists = 0
     my_gen = -1
   end if
@@ -555,23 +660,37 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
     unsupported = .false.
     nd = 0
     do k = 1, 2
-      if (k == 2) allocate (dpi(max(1, nd)), dpj(max(1, nd)))
+      if (k == 2) allocate (dpi(max(1, nd)), dpj(max(1, nd)), dcls(max(1, nd)))
       nd = 0
       do a = 2, numat
         if (iorbs(a) == 0) cycle
-        spi = (iorbs(a) == 1 .or. iorbs(a) == 4) .and. .not. dorbs(nat(a)) .and. iod(nat(a)) == 0
         do b = 1, a - 1
           if (iorbs(b) == 0 .or. nij(a, b) < 0) cycle
-          spj = (iorbs(b) == 1 .or. iorbs(b) == 4) .and. .not. dorbs(nat(b)) .and. iod(nat(b)) == 0
-          if (spi .and. spj) cycle
+          c = acc_pair_class(nat(a), iorbs(a), nat(b), iorbs(b))
+          if (c == 0) cycle
           if (iorbs(a) <= 5 .and. iorbs(b) <= 5) unsupported = .true.   ! not an s,p pair and not a d pair
           nd = nd + 1
           if (k == 2) then
             dpi(nd) = a
             dpj(nd) = b
+            dcls(nd) = c
           end if
         end do
       end do
+    end do
+    nsd = count(dcls(1:nd) == 1)
+    ndd = nd - nsd
+    allocate (isd(max(1, nsd)), idd(max(1, ndd)))
+    nsd = 0
+    ndd = 0
+    do kd = 1, nd
+      if (dcls(kd) == 1) then
+        nsd = nsd + 1
+        isd(nsd) = kd
+      else
+        ndd = ndd + 1
+        idd(ndd) = kd
+      end if
     end do
     allocate (dstart(numat + 1), dlist(max(1, 2*nd)), cdi(45, max(1, nd)), cdj(45, max(1, nd)))
     dstart = 0
@@ -596,10 +715,12 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
     end do
     deallocate (dtmp)
     if (unsupported) write (iw, '(a)') ' ACC FOCK: NDDO pairs of an unsupported kind; the GPU Fock build is not used'
-    !$acc enter data copyin(nstart, near, dpi, dpj, dstart, dlist) create(cdi, cdj)
-    n_dpairs = nd
+    !$acc enter data copyin(nstart, near, dpi, dpj, dcls, isd, idd, dstart, dlist) create(cdi, cdj)
+    n_sdpairs = nsd
+    n_ddpairs = ndd
     held_lists = 4_8*(size(nstart, kind=8) + size(near, kind=8) + size(dpi, kind=8) + size(dpj, kind=8) + &
-      size(dstart, kind=8) + size(dlist, kind=8)) + 8_8*(size(cdi, kind=8) + size(cdj, kind=8))
+      size(dcls, kind=8) + size(isd, kind=8) + size(idd, kind=8) + size(dstart, kind=8) + size(dlist, kind=8)) + &
+      8_8*(size(cdi, kind=8) + size(cdj, kind=8))
     my_gen = nij_gen
   end if
   if (unsupported) return
@@ -624,21 +745,19 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   call c_f_pointer(pd_c, pdev, [mpack])
   call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
   lmem_held = max(lmem_held, lmem_sp)
-  if (nd > 0 .and. allow_dgpu) then
-    if (lmem_held < lmem_d) then
-! First launch of the d-pair kernel: measure the local-memory reservation it triggers.
-      free0 = acc_free_memory()
-      call acc_fz2n_dpairs(numat, mpack, nd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
-      drop = free0 - acc_free_memory()
-      write (iw, '(a,f6.2,a,f6.2,a)') ' ACC MOZYME: d-pair kernel stack reservation: predicted ', &
-        dble(lmem_d - lmem_held)/1024.d0**3, ' GB, measured ', dble(drop)/1024.d0**3, ' GB'
-      if (abs(dble(drop) - dble(lmem_d - lmem_held)) > 0.1d0*dble(lmem_d - lmem_held)) write (iw, '(a)') &
-        ' ACC MOZYME: WARNING: the stack reservation differs from the prediction by more than 10 %; update stack_rotate'
-      lmem_held = lmem_d
-    else
-      call acc_fz2n_dpairs(numat, mpack, nd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
-    end if
+! Pairs with d orbitals: each kernel's first launch measures the local-memory reservation it triggers.
+  if (nsd > 0 .and. allow_sdgpu) then
+    call acc_lmem_begin(lmem_sd, free0)
+    call acc_fz2n_sdpairs(numat, mpack, nd, nsd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, isd, cdi, cdj)
+    call acc_lmem_end(lmem_sd, free0, 's,p-d pair (rotate_spd)')
   end if
+  if (ndd > 0 .and. allow_ddgpu) then
+    call acc_lmem_begin(lmem_dd, free0)
+    call acc_fz2n_ddpairs(numat, mpack, nd, ndd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, idd, cdi, cdj)
+    call acc_lmem_end(lmem_dd, free0, 'd,d pair (rotate)')
+  end if
+  if ((nsd > 0 .and. allow_sdgpu) .or. (ndd > 0 .and. allow_ddgpu)) call acc_fz2n_dsum(numat, mpack, nd, fdev, &
+    iorbs, nij, dstart, dlist, dcls, allow_sdgpu, allow_ddgpu, cdi, cdj)
   call acc_from_device(f, fd_c, mpack)
   fd_ok = .false.
   pd_ok = .false.
@@ -652,69 +771,119 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 end subroutine acc_fz2n
 
 #ifdef _OPENACC
-subroutine acc_fz2n_dpairs(numat, mpack, nd, f, ptot, iorbs, nat, coord, nij, dpi, dpj, dstart, dlist, cdi, cdj)
-! NDDO pairs that involve d orbitals, one thread per pair: integrals from the general rotate, then
-! the contraction of focd2z (direct mode, wk = wj). Each thread subtracts the exchange terms from
-! its pair's off-diagonal block of f (one writer per block) and stores the contributions to the two
-! diagonal blocks in cdi (higher atom) and cdj (lower atom); a second kernel adds those to f, one
-! gang per atom, summing over the atom's pairs in a fixed order.
+subroutine acc_fz2n_sdpairs(numat, mpack, nd, nsd, f, ptot, iorbs, nat, coord, nij, dpi, dpj, isd, cdi, cdj)
+! NDDO pairs of one s,p,d atom with an s or s,p atom, one thread per pair: integrals from rotate_spd
+! (stack sized for this case), then the focd2z contraction (acc_dpair_contract).
   implicit none
-  integer, intent(in) :: numat, mpack, nd
+  integer, intent(in) :: numat, mpack, nd, nsd
   double precision, intent(inout) :: f(mpack)
   double precision, intent(in) :: ptot(mpack), coord(3, numat)
-  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), dpi(nd), dpj(nd), dstart(numat + 1), dlist(*)
+  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), dpi(nd), dpj(nd), isd(nsd)
   double precision, intent(inout) :: cdi(45, nd), cdj(45, nd)
-  integer :: kd, ii, jj, iab, jba, di, dj, l, i, j, k, ka, kc, ij, kl, ll, loop, ik, il, jk, jl, kr, a, e, npk, m, x
-  double precision :: w(2025), e1b(45), e2a(45), enuc, aa, bb, wv, s
+  integer :: m, kd, ii, jj
+  double precision :: w(450), e1b(45), e2a(45), enuc
+  !$acc routine(rotate_spd) seq
+  !$acc routine(acc_dpair_contract) seq
+  !$acc data present(nij, dpi, dpj, isd, cdi, cdj) copyin(iorbs, nat, coord) deviceptr(f, ptot)
+  !$acc parallel loop gang vector_length(64) private(w, e1b, e2a, enuc, kd, ii, jj)
+  do m = 1, nsd
+    kd = isd(m)
+    ii = dpi(kd)
+    jj = dpj(kd)
+    call rotate_spd(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, e1b, e2a, enuc)
+    call acc_dpair_contract(kd, nd, mpack, iorbs(ii), iorbs(jj), nij(ii, ii), nij(jj, jj), nij(ii, jj), w, f, &
+      ptot, cdi, cdj)
+  end do
+  !$acc end data
+end subroutine acc_fz2n_sdpairs
+
+subroutine acc_fz2n_ddpairs(numat, mpack, nd, ndd, f, ptot, iorbs, nat, coord, nij, dpi, dpj, idd, cdi, cdj)
+! The other NDDO pairs with d orbitals (two s,p,d atoms), one thread per pair: integrals from the
+! general rotate, whose per-thread stack is about 71 KB, then the focd2z contraction.
+  implicit none
+  integer, intent(in) :: numat, mpack, nd, ndd
+  double precision, intent(inout) :: f(mpack)
+  double precision, intent(in) :: ptot(mpack), coord(3, numat)
+  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), dpi(nd), dpj(nd), idd(ndd)
+  double precision, intent(inout) :: cdi(45, nd), cdj(45, nd)
+  integer :: m, kd, ii, jj, kr
+  double precision :: w(2025), e1b(45), e2a(45), enuc
   !$acc routine(rotate) seq
-  !$acc data present(nij, dpi, dpj, dstart, dlist, cdi, cdj) copyin(iorbs, nat, coord) deviceptr(f, ptot)
-  !$acc parallel loop gang vector_length(64) private(w, e1b, e2a, enuc, ii, jj, iab, jba, di, dj, l, kr, loop, ka, kc, &
-  !$acc& ij, kl, aa, bb, wv, ik, il, jk, jl, i, j, k, ll)
-  do kd = 1, nd
+  !$acc routine(acc_dpair_contract) seq
+  !$acc data present(nij, dpi, dpj, idd, cdi, cdj) copyin(iorbs, nat, coord) deviceptr(f, ptot)
+  !$acc parallel loop gang vector_length(64) private(w, e1b, e2a, enuc, kd, ii, jj, kr)
+  do m = 1, ndd
+    kd = idd(m)
     ii = dpi(kd)
     jj = dpj(kd)
     kr = 1
     call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, kr, e1b, e2a, enuc)
-    iab = iorbs(ii)
-    jba = iorbs(jj)
-    di = nij(ii, ii)
-    dj = nij(jj, jj)
-    l = nij(ii, jj)
-    do x = 1, 45
-      cdi(x, kd) = 0.d0
-      cdj(x, kd) = 0.d0
-    end do
-    loop = 0
-    do i = 1, iab
-      ka = (i*(i - 1))/2
-      aa = 2.0d0
-      do j = 1, i
-        if (i == j) aa = 1.0d0
-        ij = ka + j
-        do k = 1, jba
-          kc = (k*(k - 1))/2
-          bb = 2.0d0
-          do ll = 1, k
-            if (k == ll) bb = 1.0d0
-            kl = kc + ll
-            loop = loop + 1
-            wv = w(loop)
-            cdi(ij, kd) = cdi(ij, kd) + bb*wv*ptot(dj + kl)
-            cdj(kl, kd) = cdj(kl, kd) + aa*wv*ptot(di + ij)
-            wv = w(loop)*aa*bb*0.125d0
-            ik = (i - 1)*jba + k
-            il = (i - 1)*jba + ll
-            jk = (j - 1)*jba + k
-            jl = (j - 1)*jba + ll
-            f(l + ik) = f(l + ik) - wv*ptot(l + jl)
-            f(l + il) = f(l + il) - wv*ptot(l + jk)
-            f(l + jk) = f(l + jk) - wv*ptot(l + il)
-            f(l + jl) = f(l + jl) - wv*ptot(l + ik)
-          end do
+    call acc_dpair_contract(kd, nd, mpack, iorbs(ii), iorbs(jj), nij(ii, ii), nij(jj, jj), nij(ii, jj), w, f, &
+      ptot, cdi, cdj)
+  end do
+  !$acc end data
+end subroutine acc_fz2n_ddpairs
+
+subroutine acc_dpair_contract(kd, nd, mpack, iab, jba, di, dj, l, w, f, ptot, cdi, cdj)
+! The contraction of focd2z (direct mode, wk = wj) for NDDO pair kd with integrals w: subtracts the
+! exchange terms from the pair's off-diagonal block of f (one writer per block) and stores the
+! contributions to the two diagonal blocks in cdi(:,kd) (higher atom) and cdj(:,kd) (lower atom);
+! acc_fz2n_dsum adds those to f.
+  implicit none
+  !$acc routine seq
+  integer, intent(in) :: kd, nd, mpack, iab, jba, di, dj, l
+  double precision, intent(in) :: w(*), ptot(mpack)
+  double precision, intent(inout) :: f(mpack), cdi(45, nd), cdj(45, nd)
+  integer :: i, j, k, ll, ka, kc, ij, kl, loop, ik, il, jk, jl, x
+  double precision :: aa, bb, wv
+  do x = 1, 45
+    cdi(x, kd) = 0.d0
+    cdj(x, kd) = 0.d0
+  end do
+  loop = 0
+  do i = 1, iab
+    ka = (i*(i - 1))/2
+    aa = 2.0d0
+    do j = 1, i
+      if (i == j) aa = 1.0d0
+      ij = ka + j
+      do k = 1, jba
+        kc = (k*(k - 1))/2
+        bb = 2.0d0
+        do ll = 1, k
+          if (k == ll) bb = 1.0d0
+          kl = kc + ll
+          loop = loop + 1
+          wv = w(loop)
+          cdi(ij, kd) = cdi(ij, kd) + bb*wv*ptot(dj + kl)
+          cdj(kl, kd) = cdj(kl, kd) + aa*wv*ptot(di + ij)
+          wv = w(loop)*aa*bb*0.125d0
+          ik = (i - 1)*jba + k
+          il = (i - 1)*jba + ll
+          jk = (j - 1)*jba + k
+          jl = (j - 1)*jba + ll
+          f(l + ik) = f(l + ik) - wv*ptot(l + jl)
+          f(l + il) = f(l + il) - wv*ptot(l + jk)
+          f(l + jk) = f(l + jk) - wv*ptot(l + il)
+          f(l + jl) = f(l + jl) - wv*ptot(l + ik)
         end do
       end do
     end do
   end do
+end subroutine acc_dpair_contract
+
+subroutine acc_fz2n_dsum(numat, mpack, nd, f, iorbs, nij, dstart, dlist, dcls, sd_on, dd_on, cdi, cdj)
+! Adds the diagonal-block contributions of the pairs with d orbitals computed on the GPU (kinds
+! enabled by sd_on, dd_on) to f, one gang per atom, summing over the atom's pairs in a fixed order.
+  implicit none
+  integer, intent(in) :: numat, mpack, nd
+  double precision, intent(inout) :: f(mpack)
+  integer, intent(in) :: iorbs(numat), nij(numat, numat), dstart(numat + 1), dlist(*), dcls(nd)
+  logical, intent(in) :: sd_on, dd_on
+  double precision, intent(in) :: cdi(45, nd), cdj(45, nd)
+  integer :: a, e, npk, m, kd
+  double precision :: s
+  !$acc data present(nij, dstart, dlist, dcls, cdi, cdj) copyin(iorbs) deviceptr(f)
   !$acc parallel loop gang vector_length(64) private(npk)
   do a = 1, numat
     if (dstart(a + 1) == dstart(a)) cycle
@@ -723,18 +892,23 @@ subroutine acc_fz2n_dpairs(numat, mpack, nd, f, ptot, iorbs, nat, coord, nij, dp
     do e = 1, npk
       s = 0.d0
       do m = dstart(a), dstart(a + 1) - 1
-        kd = dlist(m)
-        if (kd > 0) then
+        kd = abs(dlist(m))
+        if (dcls(kd) == 1) then
+          if (.not. sd_on) cycle
+        else
+          if (.not. dd_on) cycle
+        end if
+        if (dlist(m) > 0) then
           s = s + cdi(e, kd)
         else
-          s = s + cdj(e, -kd)
+          s = s + cdj(e, kd)
         end if
       end do
       f(nij(a, a) + e) = f(nij(a, a) + e) + s
     end do
   end do
   !$acc end data
-end subroutine acc_fz2n_dpairs
+end subroutine acc_fz2n_dsum
 
 subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, nstart, near, lnear)
   implicit none

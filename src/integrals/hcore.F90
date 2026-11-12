@@ -312,5 +312,6 @@
   200   format(10f8.4)
       end if
       call acc_integral_test()   ! OpenACC integral prototype check (no-op unless built with OpenACC and MOPAC_ACC_INTEGRAL_TEST is set)
+      call spd_integral_check()  ! rotate_spd vs rotate, bitwise (no-op unless MOPAC_ACC_INTEGRAL_TEST is set)
       return
       end subroutine hcore

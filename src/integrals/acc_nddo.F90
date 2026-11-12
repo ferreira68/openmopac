@@ -171,3 +171,59 @@ subroutine acc_integral_test()
   deallocate (pi, pj, vg, znat, xyz)
 #endif
 end subroutine acc_integral_test
+
+subroutine spd_integral_check()
+! If MOPAC_ACC_INTEGRAL_TEST is set: for every atom pair in which exactly one atom has d orbitals
+! (the preconditions of rotate_spd), compares rotate_spd with rotate on the CPU. They must be
+! bitwise equal. Runs in every build (it is not OpenACC code).
+  use molkst_C, only : numat, id
+  use common_arrays_C, only : nat, coord
+  use parameters_C, only : natorb, dorbs, iod
+  use chanel_C, only : iw
+  implicit none
+  integer :: i, j, k, k2, kr, li, lj, nw, npair, nbad, stat, a, b
+  double precision :: wloc(2025), e1b(45), e2a(45), enuc, wspd(450), e1s(45), e2s(45), ens, dmax
+  logical :: ok, spa, spb
+  character(len=16) :: env
+  call get_environment_variable("MOPAC_ACC_INTEGRAL_TEST", env, status=stat)
+  if (stat /= 0 .or. id /= 0) return
+  npair = 0
+  nbad = 0
+  dmax = 0.d0
+  do i = 2, numat
+    do j = 1, i - 1
+      do k = 1, 2
+        if (k == 1) then
+          a = i; b = j
+        else
+          a = j; b = i                     ! both orders: the d atom first and second
+        end if
+        spa = natorb(nat(a)) <= 4 .and. .not. dorbs(nat(a)) .and. iod(nat(a)) == 0
+        spb = natorb(nat(b)) <= 4 .and. .not. dorbs(nat(b)) .and. iod(nat(b)) == 0
+        if (.not. ((natorb(nat(a)) == 9 .and. spb) .or. (natorb(nat(b)) == 9 .and. spa))) cycle
+        npair = npair + 1
+        kr = 1
+        call rotate(nat(a), nat(b), coord(1, a), coord(1, b), wloc, kr, e1b, e2a, enuc)
+        call rotate_spd(nat(a), nat(b), coord(1, a), coord(1, b), wspd, e1s, e2s, ens)
+        li = natorb(nat(a))
+        lj = natorb(nat(b))
+        nw = ((li*(li + 1))/2)*((lj*(lj + 1))/2)
+        ok = (ens == enuc)
+        do k2 = 1, nw
+          if (wspd(k2) /= wloc(k2)) ok = .false.
+          dmax = max(dmax, abs(wspd(k2) - wloc(k2)))
+        end do
+        do k2 = 1, (li*(li + 1))/2
+          if (e1s(k2) /= e1b(k2)) ok = .false.
+        end do
+        do k2 = 1, (lj*(lj + 1))/2
+          if (e2s(k2) /= e2a(k2)) ok = .false.
+        end do
+        if (.not. ok) nbad = nbad + 1
+      end do
+    end do
+  end do
+  write (iw, '(/,a,i0,a,i0,a,es10.3)') ' SPD INTEGRAL CHECK: ', npair, ' ordered s,p-d atom pairs; ', nbad, &
+    ' not bitwise equal to rotate; max |dW| ', dmax
+  flush (iw)
+end subroutine spd_integral_check

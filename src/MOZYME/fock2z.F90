@@ -678,7 +678,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !      & qdenet, qscnet, gden, qscat
 
      use linear_cosmo, only: addfckz
-    use acc_mozyme_C, only : fd_ok, pd_ok, allow_dgpu, n_dpairs
+    use acc_mozyme_C, only : fd_ok, pd_ok, allow_sdgpu, allow_ddgpu, n_sdpairs, n_ddpairs, acc_pair_on_gpu, acc_sp_atom
 
     implicit none
    !***********************************************************************
@@ -713,7 +713,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     double precision, dimension (171) :: fdummy = 0.d0
     double precision, dimension (2025) :: wjloc = 0.d0
     integer :: acc_mode, pass, npass, filter
-    logical :: p_on_device, acc_ok
+    logical :: p_on_device, acc_ok, cpu_pairs, cpu_pair
     integer(8) :: c0, c1, crate
     double precision :: tg
     double precision, allocatable :: fg(:)
@@ -785,10 +785,10 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: every atom pair on the device (acc_fz2n,
    !   called at the end, after the one-center and COSMO terms, so that the device copy of F is
    !   complete); the pair loop below is then skipped (npass = 0), or, if the device-memory plan
-   !   keeps the NDDO pairs with d orbitals on the CPU (allow_dgpu false), runs for those only
-   !   (filter = 1; 2 = all other pairs; 0 = all). MOPAC_ACC_FOCK=test: the GPU terms go into a copy
-   !   of F, the CPU loop computes all pairs into F (in two passes if d pairs are on the CPU, the copy
-   !   being taken after the first), and the two are compared.
+   !   keeps some NDDO pairs with d orbitals on the CPU (allow_sdgpu, allow_ddgpu; acc_pair_on_gpu),
+   !   runs for those only (filter = 1; 2 = all other pairs; 0 = all). MOPAC_ACC_FOCK=test: the GPU
+   !   terms go into a copy of F, the CPU loop computes all pairs into F (in two passes if some pairs
+   !   are on the CPU, the copy being taken after the first), and the two are compared.
     p_on_device = pd_ok        ! set by the GPU density build if the device copy of P is current
     fd_ok = .false.
     pd_ok = .false.
@@ -801,15 +801,16 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
       call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .false., .false., .true., acc_ok)
       if (.not. acc_ok) acc_mode = 0
     end if
+    cpu_pairs = (n_sdpairs > 0 .and. .not. allow_sdgpu) .or. (n_ddpairs > 0 .and. .not. allow_ddgpu)
     if (acc_mode == 1) then
       npass = 0
-      if (n_dpairs > 0 .and. .not. allow_dgpu) then
+      if (cpu_pairs) then
         npass = 1
         filter = 1
       end if
     else if (acc_mode == 2) then
       allocate (fg(mpack))
-      if (n_dpairs > 0 .and. .not. allow_dgpu) then
+      if (cpu_pairs) then
         npass = 2
         filter = 1
       else
@@ -841,6 +842,9 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
         end if
         iab = iorbs(ii)
         if (iab /= 0) then
+          if (filter == 1 .and. allow_sdgpu) then
+            if (acc_sp_atom(nat(ii), iab)) cycle   ! all pairs of this atom are on the GPU (direct mode)
+          end if
           jred = 1
           iim1 = ii - ione
           do jj = 1, iim1
@@ -853,7 +857,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
             end if
             jba = iorbs(jj)
             if (filter /= 0) then
-              if ((nijbo(ii, jj) >= 0 .and. (iab > 5 .or. jba > 5)) .neqv. (filter == 1)) cycle
+              cpu_pair = .false.
+              if (iab > 5 .or. jba > 5) then
+                if (nijbo(ii, jj) >= 0) cpu_pair = .not. acc_pair_on_gpu(nat(ii), iab, nat(jj), jba)
+              end if
+              if (cpu_pair .neqv. (filter == 1)) cycle
             end if
             if (nijbo(ii, jj) >= 0) then
               if (direct .and. (calci .or. calcj)) then
