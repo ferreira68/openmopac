@@ -590,10 +590,31 @@ subroutine acc_diagg1_order(ncand, nvir, ci, cj, cl, cv, nij, oldlim, fmo_dim, i
   double precision, intent(in) :: cv(ncand), oldlim
   integer, intent(out) :: ifmo(2, fmo_dim), nfmo_out(nvir), ijc
   double precision, intent(out) :: fmo(fmo_dim), sumt, tiny
-  integer, allocatable :: start(:), ord(:)
-  integer :: i, k, m, n, nf, key
-  allocate (start(nvir + 1), ord(max(1, ncand)))
-! counting sort on i
+  integer, allocatable :: start(:), ord(:), byj(:), cntj(:)
+  integer :: i, j, k, m, nf, nj
+! Stable LSD radix sort of the candidates on (i, j): a counting sort on j, then a stable counting sort
+! on i. Equal (i, j) keys keep their K2 order, as in the insertion sort this replaces (same order,
+! linear time; the insertion sort was quadratic in the candidates per virtual LMO).
+  nj = 0
+  do k = 1, ncand
+    nj = max(nj, cj(k))
+  end do
+  allocate (start(nvir + 1), ord(max(1, ncand)), byj(max(1, ncand)), cntj(nj + 1))
+! counting sort on j
+  cntj = 0
+  do k = 1, ncand
+    cntj(cj(k) + 1) = cntj(cj(k) + 1) + 1
+  end do
+  cntj(1) = 1
+  do j = 1, nj
+    cntj(j + 1) = cntj(j + 1) + cntj(j)
+  end do
+  do k = 1, ncand
+    j = cj(k)
+    byj(cntj(j)) = k
+    cntj(j) = cntj(j) + 1
+  end do
+! stable counting sort on i
   start = 0
   do k = 1, ncand
     start(ci(k) + 1) = start(ci(k) + 1) + 1
@@ -602,7 +623,8 @@ subroutine acc_diagg1_order(ncand, nvir, ci, cj, cl, cv, nij, oldlim, fmo_dim, i
   do i = 1, nvir
     start(i + 1) = start(i + 1) + start(i)
   end do
-  do k = 1, ncand
+  do m = 1, ncand
+    k = byj(m)
     i = ci(k)
     ord(start(i)) = k
     start(i) = start(i) + 1
@@ -611,19 +633,6 @@ subroutine acc_diagg1_order(ncand, nvir, ci, cj, cl, cv, nij, oldlim, fmo_dim, i
     start(i + 1) = start(i)
   end do
   start(1) = 1
-! insertion sort on j within each i
-  do i = 1, nvir
-    do m = start(i) + 1, start(i + 1) - 1
-      key = ord(m)
-      n = m - 1
-      do while (n >= start(i))
-        if (cj(ord(n)) <= cj(key)) exit
-        ord(n + 1) = ord(n)
-        n = n - 1
-      end do
-      ord(n + 1) = key
-    end do
-  end do
   ijc = 0
   sumt = 0.d0
   tiny = 0.d0
@@ -646,7 +655,7 @@ subroutine acc_diagg1_order(ncand, nvir, ci, cj, cl, cv, nij, oldlim, fmo_dim, i
     end do
     nfmo_out(i) = nf
   end do
-  deallocate (start, ord)
+  deallocate (start, ord, byj, cntj)
 end subroutine acc_diagg1_order
 #endif
 
