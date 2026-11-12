@@ -62,12 +62,16 @@ module acc_mozyme_C
 ! 10 % (e.g. after a code change that alters the stack).
 ! Levels (shedding order, by benefit per byte): 1 everything on the GPU; 2 d,d pairs on the CPU;
 ! 3 all pairs with d orbitals on the CPU; 4 also the density; 5 also diagg1 (Fock only); 6 nothing.
-! Level 1 is considered only if there are at least min_dd_gpu d,d pairs: the d,d kernel reserves
-! gigabytes, so it is used only where the CPU would spend noticeable time. On the CPU
-! (acc_fz2n_cpu_dpairs, OpenMP) a d,d pair costs about 20 us per Fock build and thread (17-22 us
-! measured, DMSO boxes of 4,950-319,600 d,d pairs, Ultra 9 275HX; with 16 threads the CPU d,d pass
-! took 5.6 s vs 5.2 s on the GPU at 19,900 pairs). min_dd_gpu = 1,000 x the number of OpenMP
-! threads, i.e. about 20 ms per build (1,000 without OpenMP; 16,000 with 16 threads).
+! Level 1 (d,d pairs on the GPU) is decided at run time, because its value depends on the system,
+! the CPU and the GPU: the d,d kernel reserves gigabytes (stack x thread slots), while on the CPU
+! (acc_fz2n_cpu_dpairs, OpenMP) the d,d pairs may cost little. The plan starts at level 2 unless the
+! reservation is already held (an earlier geometry); then, at level 2, the first Fock builds measure
+! the CPU d,d pass (t_dd_cpu), the time per SCF iteration (between Fock builds, t_iter) and the GPU
+! s,p-d kernel time per pair, from which the d,d kernel time is estimated (x k_dd: d,d pairs cost
+! about 11 times an s,p-d pair on the GPU, Nsight Systems, RTX 5090 Laptop, 19,900 d,d / 360,000
+! s,p-d pairs). The d,d pairs move to the GPU (acc_dd_decide) if the estimated saving exceeds f_dd
+! (5 %) of an iteration and the reservation fits in the free device memory with the plan's headroom.
+! One decision per geometry. MOPAC_ACC_MEM_LEVEL=1 forces level 1.
   use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long, c_int, c_char, c_funptr
   implicit none
   integer, allocatable :: nij(:,:)
@@ -79,8 +83,10 @@ module acc_mozyme_C
   logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false.
   logical :: allow_sdgpu = .false., allow_ddgpu = .false.   ! s,p-d and d,d NDDO pairs on the GPU
   integer(8), parameter :: stack_rotate = 71168_8, stack_rotate_sp = 6720_8, stack_rotate_spd = 20912_8
-  integer, parameter :: min_dd_per_thread = 1000
-  integer :: min_dd_gpu = 1000          ! set by acc_mozyme_plan: min_dd_per_thread x OpenMP threads
+  double precision, parameter :: k_dd = 11.d0, f_dd = 0.05d0
+  logical :: dd_pending = .false.            ! level 2 by policy: decide after measuring (acc_dd_decide)
+  double precision :: t_dd_cpu = -1.d0, t_sd_gpu = -1.d0, t_iter = -1.d0   ! seconds, last Fock build
+  integer(8) :: t_last_build = -1, plan_headroom = 0
   integer(8) :: lmem_sp = 0, lmem_sd = 0, lmem_dd = 0, lmem_held = 0   ! predicted reservations; largest so far
   integer :: n_sdpairs = 0, n_ddpairs = 0                 ! NDDO pairs of each kind with d orbitals (acc_fz2n)
 ! The NDDO pairs with d orbitals (built by acc_fz2n, used by its kernels and by acc_fz2n_cpu_dpairs):
@@ -330,7 +336,6 @@ contains
     use common_arrays_C, only : nat
     use chanel_C, only : iw
     integer, external :: acc_fock_mode, acc_diagg_mode, acc_density_mode
-!$  integer, external :: omp_get_max_threads
     logical :: want_fock, want_diagg, want_dens, f, g, d, sdg, ddg
     integer(8) :: free, total, avail, limit, headroom, b_nij, b_fp, b_pacc, b_lists, b_cand, b_lmo_g, b_lmo_d, slots
     integer(8) :: npair, npair_d, npair_sd, npair_dd, lcocc, lcvir, licocc, licvir
@@ -393,13 +398,11 @@ contains
     lmem_sd = stack_rotate_spd*slots
     lmem_dd = stack_rotate*slots
 ! Levels (module header): 1 everything; 2 d,d pairs on the CPU; 3 all d pairs on the CPU; 4 no
-! density; 5 Fock only; 6 nothing. Level 1 only with at least min_dd_gpu d,d pairs.
-! MOPAC_ACC_MEM_LEVEL (testing) starts the search at the given level.
-! MOPAC_ACC_MEM_LEVEL=1 forces the d,d kernel even with fewer than min_dd_gpu d,d pairs.
-    k0 = 1
-    min_dd_gpu = min_dd_per_thread
-!$  min_dd_gpu = min_dd_per_thread*max(1, omp_get_max_threads())
-    if (npair_dd < min_dd_gpu) k0 = 2
+! density; 5 Fock only; 6 nothing. Level 1 is chosen here only if the d,d reservation is already
+! held; otherwise it is decided after the first Fock builds (acc_dd_decide).
+! MOPAC_ACC_MEM_LEVEL (testing) starts the search at the given level (1 forces the d,d kernel).
+    k0 = 2
+    if (npair_dd > 0 .and. lmem_held >= lmem_dd) k0 = 1
     call get_environment_variable("MOPAC_ACC_MEM_LEVEL", lev, status=stat)
     if (stat == 0) then
       read (lev, *, iostat=stat) k0
@@ -418,6 +421,12 @@ contains
     allow_dens = d
     allow_sdgpu = sdg
     allow_ddgpu = ddg
+    plan_headroom = headroom
+    dd_pending = k == 2 .and. k0 == 2 .and. stat /= 0 .and. npair_dd > 0 .and. allow_sdgpu
+    t_dd_cpu = -1.d0
+    t_sd_gpu = -1.d0
+    t_iter = -1.d0
+    t_last_build = -1
     enabled = ''
     if (allow_fock) then
       if ((allow_sdgpu .or. npair_sd == 0) .and. (allow_ddgpu .or. npair_dd == 0)) then
@@ -441,8 +450,8 @@ contains
       ', headroom ', dble(headroom)/gb, ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
     write (iw, '(a,i0,a,i0,a,i0)', advance='no') ' ACC MOZYME: NDDO pairs ', npair, ', of which s,p-d ', npair_sd, &
       ', d,d ', npair_dd
-    if (npair_dd > 0 .and. npair_dd < min_dd_gpu .and. .not. allow_ddgpu) write (iw, '(a,i0,a)', advance='no') &
-      ' (fewer than ', min_dd_gpu, ': d,d pairs on the CPU)'
+    if (dd_pending) write (iw, '(a)', advance='no') &
+      ' (d,d pairs on the CPU; moved to the GPU after the first Fock builds if that pays)'
     write (iw, '(a)') ''
     write (iw, '(a,i0,2a)') ' ACC MOZYME: level ', k, '; GPU paths enabled:', trim(enabled)
     flush (iw)
@@ -462,6 +471,36 @@ contains
       if (ddg) lmem = max(lmem, lmem_dd)
     end function lmem
   end subroutine acc_mozyme_plan
+
+  subroutine acc_dd_decide(nsd, ndd)
+! Level 2 by policy: once the CPU d,d pass, an SCF iteration and the GPU s,p-d kernel have been timed,
+! move the d,d pairs to the GPU if that saves more than f_dd of an iteration and the reservation fits
+! (module header). Called by acc_fz2n after a Fock build; takes effect from the next one.
+    use chanel_C, only : iw
+    integer, intent(in) :: nsd, ndd
+    double precision :: est, saving
+    integer(8) :: free, need
+    if (t_dd_cpu < 0.d0 .or. t_iter <= 0.d0) return        ! not measured yet
+    if (nsd > 0 .and. t_sd_gpu < 0.d0) return
+    dd_pending = .false.
+    est = 0.d0
+    if (nsd > 0) est = dble(ndd)*(t_sd_gpu/dble(nsd))*k_dd
+    saving = t_dd_cpu - est
+    need = max(0_8, lmem_dd - lmem_held)
+    free = acc_free_memory()
+    write (iw, '(a,f8.4,a,f8.4,a,f8.3,a)', advance='no') ' ACC MOZYME: d,d pairs: CPU ', t_dd_cpu, &
+      ' s per Fock build, GPU (estimated) ', est, ' s, SCF iteration ', t_iter, ' s'
+    if (saving <= f_dd*t_iter) then
+      write (iw, '(a)') '; stay on the CPU (saving under 5 % of an iteration)'
+    else if (free - need < plan_headroom) then
+      write (iw, '(a,f6.2,a,f6.2,a)') '; would pay, but the kernel reservation (', dble(need)/1024.d0**3, &
+        ' GB) does not fit (free ', dble(free)/1024.d0**3, ' GB): stay on the CPU'
+    else
+      allow_ddgpu = .true.
+      write (iw, '(a,f6.2,a)') '; moved to the GPU (reservation ', dble(need)/1024.d0**3, ' GB)'
+    end if
+    flush (iw)
+  end subroutine acc_dd_decide
 
   subroutine acc_lmem_begin(predicted, free0)
 ! Before a pair kernel's launch: if it will raise the local-memory reservation (predicted, bytes,
@@ -611,6 +650,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
     fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_sdgpu, allow_ddgpu, n_sdpairs, &
     n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end, &
+    dd_pending, t_iter, t_last_build, t_sd_gpu, acc_dd_decide, &
     nd => dp_nd, nsd => dp_nsd, ndd => dp_ndd, dpi => dp_i, dpj => dp_j, dcls => dp_cls, isd => dp_isd, &
     idd => dp_idd, dstart => dp_start, dlist => dp_list, cdi => dp_ci, cdj => dp_cj
   use iso_c_binding, only : c_f_pointer
@@ -626,7 +666,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 #ifdef _OPENACC
   logical :: p_reuse
   integer, save :: nreuse = 0
-  integer(8) :: free0
+  integer(8) :: free0, tc0, tc1, trate
   integer :: c
   double precision, pointer, contiguous :: fdev(:), pdev(:)
   integer, save :: nnear = 0, my_gen = -1
@@ -743,6 +783,9 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   if (.not. acc_mozyme_buffers(mpack)) return
   supported = .true.
   if (prepare) return
+  call system_clock(tc0, trate)
+  if (t_last_build >= 0) t_iter = dble(tc0 - t_last_build)/dble(trate)   ! one SCF iteration
+  t_last_build = tc0
   call acc_to_device(fd_c, f, mpack)
   p_reuse = .false.
   if (p_on_device .and. allocated(pcom)) then
@@ -762,7 +805,10 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 ! Pairs with d orbitals: each kernel's first launch measures the local-memory reservation it triggers.
   if (nsd > 0 .and. allow_sdgpu) then
     call acc_lmem_begin(lmem_sd, free0)
+    call system_clock(tc0)
     call acc_fz2n_sdpairs(numat, mpack, nd, nsd, fdev, pdev, iorbs, nat, coord, nij, dpi, dpj, isd, cdi, cdj)
+    call system_clock(tc1)
+    if (free0 < 0) t_sd_gpu = dble(tc1 - tc0)/dble(trate)   ! not the launch that set up the reservation
     call acc_lmem_end(lmem_sd, free0, 's,p-d pair (rotate_spd)')
   end if
   if (ndd > 0 .and. allow_ddgpu) then
@@ -773,6 +819,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   if ((nsd > 0 .and. allow_sdgpu) .or. (ndd > 0 .and. allow_ddgpu)) call acc_fz2n_dsum(numat, mpack, nd, fdev, &
     iorbs, nij, dstart, dlist, dcls, allow_sdgpu, allow_ddgpu, cdi, cdj)
   call acc_from_device(f, fd_c, mpack)
+  if (dd_pending) call acc_dd_decide(nsd, ndd)
   fd_ok = .false.
   pd_ok = .false.
   if (resident .and. allocated(fcom) .and. allocated(pcom)) then
@@ -932,7 +979,7 @@ subroutine acc_fz2n_cpu_dpairs(f, ptot, iorbs, nat, coord)
 ! the number of threads. Uses the pair lists built by the preceding acc_fz2n (prepare) call.
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
-  use acc_mozyme_C, only : nij, allow_sdgpu, allow_ddgpu, nd => dp_nd, dpi => dp_i, dpj => dp_j, dcls => dp_cls, &
+  use acc_mozyme_C, only : nij, allow_sdgpu, allow_ddgpu, t_dd_cpu, nd => dp_nd, dpi => dp_i, dpj => dp_j, dcls => dp_cls, &
     dstart => dp_start, dlist => dp_list, cdi => dp_ci, cdj => dp_cj
 #endif
   implicit none
@@ -942,10 +989,12 @@ subroutine acc_fz2n_cpu_dpairs(f, ptot, iorbs, nat, coord)
 #ifdef _OPENACC
   logical :: oncpu(2)
   integer :: kd, ii, jj, kr, a, e, npk, m
+  integer(8) :: c0, c1, rate
   double precision :: w(2025), e1b(45), e2a(45), enuc, s
   oncpu(1) = .not. allow_sdgpu
   oncpu(2) = .not. allow_ddgpu
   if (nd == 0 .or. .not. (oncpu(1) .or. oncpu(2))) return
+  call system_clock(c0, rate)
 !$omp parallel do schedule(dynamic, 16) default(shared) private(kd, ii, jj, kr, w, e1b, e2a, enuc)
   do kd = 1, nd
     if (.not. oncpu(dcls(kd))) cycle
@@ -980,6 +1029,8 @@ subroutine acc_fz2n_cpu_dpairs(f, ptot, iorbs, nat, coord)
     end do
   end do
 !$omp end parallel do
+  call system_clock(c1)
+  t_dd_cpu = dble(c1 - c0)/dble(rate)     ! the d,d pass when only d,d pairs are on the CPU (level 2)
 #endif
 end subroutine acc_fz2n_cpu_dpairs
 #ifdef _OPENACC
