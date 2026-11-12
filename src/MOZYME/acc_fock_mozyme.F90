@@ -77,8 +77,14 @@ module acc_mozyme_C
   integer, allocatable :: nij(:,:)
   integer :: key_numcal = -1, key_mpack = -1, key_numat = -1
   integer :: nij_gen = 0   ! incremented on every rebuild; consumers compare with the generation they used
-  type(c_ptr) :: fd_c = c_null_ptr, pd_c = c_null_ptr, pacc_c = c_null_ptr
-  integer :: dev_len = 0, pacc_len = 0
+  type(c_ptr) :: fd_c = c_null_ptr, pd_c = c_null_ptr, pacc_c = c_null_ptr, hd_c = c_null_ptr
+  integer :: dev_len = 0, pacc_len = 0, hd_len = 0
+! hd: device copy of the core Hamiltonian h for acc_helecz, valid while hd_ok (h does not change within
+! an SCF; acc_h_invalidate is called at every entry to iter_for_MOZYME).
+  logical :: hd_ok = .false.
+! eimp_dev: the host eimp was skipped (acc_eimp_skip) because the GPU diagg1 applies it to the device
+! copy of P; any host path that needs the eimp values first calls acc_eimp_host_fallback.
+  logical :: eimp_dev = .false.
   logical :: fd_ok = .false., pd_ok = .false.
   logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false.
   logical :: allow_sdgpu = .false., allow_ddgpu = .false.   ! s,p-d and d,d NDDO pairs on the GPU
@@ -236,6 +242,29 @@ contains
 #endif
   end function acc_mozyme_pacc
 
+  logical function acc_mozyme_hbuf(n)
+! Makes hd hold at least n doubles. On failure, helecz stays on the CPU (.false.).
+    use iso_c_binding, only : c_associated
+    use chanel_C, only : iw
+    integer, intent(in) :: n
+    acc_mozyme_hbuf = .false.
+#ifdef _OPENACC
+    acc_mozyme_hbuf = .true.
+    if (n <= hd_len) return
+    if (c_associated(hd_c)) call c_acc_free(hd_c)
+    hd_len = 0
+    hd_ok = .false.
+    hd_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
+    if (.not. c_associated(hd_c)) then
+      hd_c = c_null_ptr
+      write (iw, '(a)') ' ACC MOZYME: device memory exhausted allocating the copy of H; HELECZ on the CPU'
+      acc_mozyme_hbuf = .false.
+      return
+    end if
+    hd_len = n
+#endif
+  end function acc_mozyme_hbuf
+
   subroutine acc_mozyme_give_up(what)
 ! A device allocation failed: release what this module holds and run every MOZYME step on the CPU.
     use iso_c_binding, only : c_associated
@@ -251,17 +280,21 @@ contains
   end subroutine acc_mozyme_give_up
 
   subroutine acc_mozyme_release()
-! Frees the device buffers owned by this module (fd, pd, pacc).
+! Frees the device buffers owned by this module (fd, pd, pacc, hd).
     use iso_c_binding, only : c_associated
 #ifdef _OPENACC
     if (c_associated(fd_c)) call c_acc_free(fd_c)
     if (c_associated(pd_c)) call c_acc_free(pd_c)
     if (c_associated(pacc_c)) call c_acc_free(pacc_c)
+    if (c_associated(hd_c)) call c_acc_free(hd_c)
     fd_c = c_null_ptr
     pd_c = c_null_ptr
     pacc_c = c_null_ptr
+    hd_c = c_null_ptr
     dev_len = 0
     pacc_len = 0
+    hd_len = 0
+    hd_ok = .false.
     fd_ok = .false.
     pd_ok = .false.
 #endif
@@ -388,7 +421,7 @@ contains
     if (allocated(icocc)) licocc = size(icocc, kind=8)
     if (allocated(icvir)) licvir = size(icvir, kind=8)
     b_nij = 4_8*int(numat, 8)**2
-    b_fp = 16_8*int(mpack, 8)
+    b_fp = 24_8*int(mpack, 8)              ! F, P and H
     b_pacc = 8_8*int(mpack, 8)
     b_lists = 8_8*npair + 760_8*npair_d + 16_8*numat
     b_cand = 30_8*max(1000000_8, 2_8*int(fmo_dim, 8))     ! candidate buffer (20 bytes each) plus growth
@@ -1393,3 +1426,166 @@ subroutine acc_fock_compare(f, fg, tg)
     ' (max |F| ', fmax, ');  GPU part ', tg, ' s'
   flush (iw)
 end subroutine acc_fock_compare
+
+subroutine acc_h_invalidate()
+! Called at every entry to iter_for_MOZYME: h may have changed since the last SCF (new geometry,
+! hcore_for_MOZYME, addhcr, add_more_interactions), so the device copy is refreshed on next use.
+#ifdef _OPENACC
+  use acc_mozyme_C, only : hd_ok, eimp_dev
+  hd_ok = .false.
+  eimp_dev = .false.
+#endif
+end subroutine acc_h_invalidate
+
+logical function acc_eimp_skip()
+! Called in place of the host eimp before diagg: .true. if the GPU diagg1 will run on the device copies
+! of F and P left by the GPU Fock build; it then applies eimp to the device P itself
+! (acc_eimp_kernel), and the host P keeps the density (no host reader needs the eimp values, except
+! the CPU fallbacks of diagg1 and the .den write of PLS_faulty, which call acc_eimp_host_fallback).
+#ifdef _OPENACC
+  use MOZYME_C, only : lijbo
+  use acc_mozyme_C, only : acc_mozyme_sync, allow_diagg, fd_ok, pd_ok, eimp_dev
+#endif
+  implicit none
+#ifdef _OPENACC
+  integer, external :: acc_diagg_mode
+  logical :: dummy
+  acc_eimp_skip = .false.
+  eimp_dev = .false.
+  if (.not. lijbo) return
+  if (acc_diagg_mode() /= 1) return          ! off, or test mode (the CPU diagg1 also runs)
+  dummy = acc_mozyme_sync()
+  if (.not. (allow_diagg .and. fd_ok .and. pd_ok)) return
+  eimp_dev = .true.
+  acc_eimp_skip = .true.
+#else
+  acc_eimp_skip = .false.
+#endif
+end function acc_eimp_skip
+
+subroutine acc_eimp_host_fallback()
+! A host path needs the eimp values in the host P after acc_eimp_skip: compute them now.
+#ifdef _OPENACC
+  use acc_mozyme_C, only : eimp_dev
+  if (eimp_dev) then
+    call eimp()
+    eimp_dev = .false.
+  end if
+#endif
+end subroutine acc_eimp_host_fallback
+
+logical function acc_helecz(ee)
+! Electronic energy of MOZYME (helecz) from the device copies of F and P left by the GPU Fock build and
+! a device copy of h: one gang per atom (its off-diagonal blocks with lower atoms, then its diagonal
+! block), partial sums returned per atom and added on the host in atom order, so the result is
+! reproducible. .false. (ee not set) if the device copies are not current: the caller uses helecz.
+#ifdef _OPENACC
+  use molkst_C, only : numat, mpack
+  use MOZYME_C, only : iorbs, lijbo
+  use common_arrays_C, only : h
+  use acc_mozyme_C, only : acc_mozyme_sync, acc_mozyme_hbuf, acc_to_device, acc_matches_device, nij, fd_c, pd_c, &
+    hd_c, fd_ok, pd_ok, hd_ok
+  use iso_c_binding, only : c_f_pointer
+  use chanel_C, only : iw
+#endif
+  implicit none
+  double precision, intent(out) :: ee
+#ifdef _OPENACC
+  integer, external :: acc_fock_mode
+  double precision, external :: helecz
+  double precision, pointer, contiguous :: fdev(:), pdev(:), hdev(:)
+  double precision, allocatable :: eo(:), ed(:)
+  logical :: dummy, check
+  double precision :: eh
+  integer :: i
+  integer, save :: nstale = 0
+  double precision :: so, sd
+  acc_helecz = .false.
+  if (acc_fock_mode() /= 1 .or. .not. lijbo) return
+  dummy = acc_mozyme_sync()
+  if (.not. (fd_ok .and. pd_ok) .or. .not. allocated(h)) return
+  if (size(h) < mpack) return
+  if (.not. acc_mozyme_hbuf(mpack)) return
+  if (hd_ok) then
+    if (.not. acc_matches_device(hd_c, h, mpack, 0.d0)) then
+      nstale = nstale + 1
+      if (nstale <= 20) write (iw, '(a)') ' ACC HELECZ: device copy of H was stale; copied again'
+      hd_ok = .false.
+    end if
+  end if
+  check = .not. hd_ok          ! first use in this SCF: also compute helecz on the host and compare
+  if (.not. hd_ok) then
+    call acc_to_device(hd_c, h, mpack)
+    hd_ok = .true.
+  end if
+  call c_f_pointer(fd_c, fdev, [mpack])
+  call c_f_pointer(pd_c, pdev, [mpack])
+  call c_f_pointer(hd_c, hdev, [mpack])
+  allocate (eo(numat), ed(numat))
+  call acc_helecz_kernel(numat, mpack, fdev, pdev, hdev, nij, iorbs, eo, ed)
+  so = 0.d0
+  sd = 0.d0
+  do i = 1, numat
+    so = so + eo(i)
+    sd = sd + ed(i)
+  end do
+  ee = so + 0.5d0*sd
+  deallocate (eo, ed)
+  acc_helecz = .true.
+  if (check) then
+    eh = helecz()
+    write (iw, '(a,es24.16,a,es10.3,a)') ' ACC HELECZ: GPU ', ee, ' eV, |GPU - CPU| ', abs(ee - eh), ' eV'
+    if (abs(ee - eh) > 1.d-9*max(1.d0, abs(eh))) write (iw, '(a)') &
+      ' ACC HELECZ: WARNING: the GPU and CPU electronic energies differ by more than 1e-9 (relative)'
+    flush (iw)
+  end if
+#else
+  ee = 0.d0
+  acc_helecz = .false.
+#endif
+end function acc_helecz
+
+#ifdef _OPENACC
+subroutine acc_helecz_kernel(numat, mpack, f, p, h, nij, iorbs, eo, ed)
+! Per atom i: eo(i) = sum of p*(h+f) over the off-diagonal blocks (i, j < i) and the off-diagonal
+! elements of the diagonal block; ed(i) = the same over the diagonal elements (helecz weights them 1/2).
+  implicit none
+  integer, intent(in) :: numat, mpack
+  double precision, intent(in) :: f(mpack), p(mpack), h(mpack)
+  integer, intent(in) :: nij(numat, numat), iorbs(numat)
+  double precision, intent(out) :: eo(numat), ed(numat)
+  integer :: i, j, k, m, l1, l2, nb
+  double precision :: s, so, sd
+  !$acc data present(nij) copyin(iorbs) copyout(eo, ed) deviceptr(f, p, h)
+  !$acc parallel loop gang vector_length(128) private(s, so, sd, k)
+  do i = 1, numat
+    s = 0.d0
+    !$acc loop vector reduction(+:s) private(k, nb)
+    do j = 1, i - 1
+      k = nij(j, i)                ! nijbo is symmetric; (j, i) is contiguous in j
+      if (k >= 0) then
+        nb = iorbs(i)*iorbs(j)
+        do m = k + 1, k + nb
+          s = s + p(m)*(h(m) + f(m))
+        end do
+      end if
+    end do
+    so = 0.d0
+    sd = 0.d0
+    k = nij(i, i)
+    !$acc loop seq
+    do l1 = 1, iorbs(i)
+      !$acc loop seq
+      do l2 = 1, l1 - 1
+        k = k + 1
+        so = so + p(k)*(h(k) + f(k))
+      end do
+      k = k + 1
+      sd = sd + p(k)*(h(k) + f(k))
+    end do
+    eo(i) = s + so
+    ed(i) = sd
+  end do
+  !$acc end data
+end subroutine acc_helecz_kernel
+#endif

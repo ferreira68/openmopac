@@ -63,12 +63,13 @@ subroutine iter_for_MOZYME (ee)
       icalcn = 0, imol = 0, nmol = 0, lstart = 0, add_niter
     double precision, save :: selcon, eold,  sum
     integer, external :: ijbo
-    logical, external :: PLS_faulty
+    logical, external :: PLS_faulty, acc_eimp_skip, acc_helecz
     double precision, external :: helecz, reada, seconds
     integer, dimension (:), allocatable :: iwork
     double precision, dimension (:), allocatable :: rwork
     add_niter = 0
     tstart = seconds(1)
+    call acc_h_invalidate()   ! h may have changed since the last SCF: refresh its device copy on next use
 !
         80  continue
     if (nmol /= numcal) then
@@ -462,7 +463,7 @@ subroutine iter_for_MOZYME (ee)
         end if
         if (icalcn /= step_num) then
           if (times) call timer (" After BUILDF")
-          ee = helecz()
+          if (.not. acc_helecz(ee)) ee = helecz()
           if (times) call timer (" After HELEC")
           escf = (ee+enuclr) * fpc_9 + atheat
           if (useps) then
@@ -494,7 +495,7 @@ subroutine iter_for_MOZYME (ee)
         endfile (iw)
         backspace (iw)
       end if
-      call eimp ()
+      if (.not. acc_eimp_skip()) call eimp ()   ! acc_eimp_skip: the GPU diagg1 applies it on the device
       if (nmol == numcal .and. numat > numred+1) then
         indi = 1
       else
@@ -513,6 +514,7 @@ subroutine iter_for_MOZYME (ee)
 !
           numcal = numcal + 1
           add_niter = niter
+          call acc_eimp_host_fallback()   ! the .den file has always held P after eimp
           if (use_disk) call pinout(1, .false.)
           call l_control("OLDEN", len_trim("OLDEN"), 1)
           call l_control("SILENT", len_trim("SILENT"), 1)
@@ -565,7 +567,7 @@ subroutine iter_for_MOZYME (ee)
         write (iw, "(' FOCK    MATRIX ON ITERATION',I4)") niter
         call vecprt_for_MOZYME (f, norbs)
       end if
-      ee = helecz()
+      if (.not. acc_helecz(ee)) ee = helecz()   ! acc_helecz: on the GPU when F and P are there
       escf = (ee+enuclr) * fpc_9 + atheat
       if (times) call timer (" After HELEC")
       if (useps) then

@@ -65,7 +65,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   use MOZYME_C, only : ncf, nce, nncf, nnce, ncocc, ncvir, icocc, icvir, cocc, cvir, iorbs, nfmo
   use common_arrays_C, only : nfirst, nlast, p
   use acc_mozyme_C, only : nij_d => nij, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_matches_device, &
-    fd_c, pd_c, fd_ok, pd_ok, allow_diagg, held_cand
+    fd_c, pd_c, fd_ok, pd_ok, allow_diagg, held_cand, eimp_dev
   use common_arrays_C, only : fcom => f
   use iso_c_binding, only : c_f_pointer
   use chanel_C, only : iw
@@ -101,6 +101,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
       capsave = 0
       held_cand = 0
     end if
+    call acc_eimp_host_fallback()       ! the CPU diagg1 reads the eimp values from the host P
     return
   end if
   ok = .true.
@@ -110,14 +111,16 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     if (loc(fao(1)) /= loc(fcom(1))) then
       fd_ok = .false.
     else
-! eimp (called before diagg) replaces the first element of each off-diagonal block of the host P
-! by the sum of squares of that block of F, which diagg1 uses for screening: do the same on the
-! device copy, which still holds the density of the Fock build.
+! eimp replaces the first element of each off-diagonal block of P by the sum of squares of that
+! block of F, which diagg1 uses for screening. The device copy still holds the density of the Fock
+! build. If the host eimp ran, apply it here too and then compare; if it was skipped (eimp_dev,
+! acc_eimp_skip), compare first (both copies hold the density), then apply it on the device only.
       call c_f_pointer(fd_c, fdev, [mpack])
       call c_f_pointer(pd_c, pdev, [mpack])
-      call acc_eimp_kernel(numat, mpack, fdev, pdev, nij_d, iorbs)
+      if (.not. eimp_dev) call acc_eimp_kernel(numat, mpack, fdev, pdev, nij_d, iorbs)
       fstale = .not. acc_matches_device(fd_c, fao, mpack, 0.d0)
       pstale = .not. acc_matches_device(pd_c, p, mpack, 1.d-12)
+      if (eimp_dev .and. .not. (fstale .or. pstale)) call acc_eimp_kernel(numat, mpack, fdev, pdev, nij_d, iorbs)
       if (fstale .or. pstale) then
         nstale = nstale + 1
         if (nstale <= 20) write (iw, '(a,i0,a,l2,a,l2)') ' ACC DIAGG: device copy stale (occurrence ', nstale, &
@@ -131,10 +134,16 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   if (.not. fd_ok) then
     if (.not. acc_mozyme_buffers(mpack)) then
       ok = .false.
+      call acc_eimp_host_fallback()
       return
     end if
     call acc_to_device(fd_c, fao, mpack)
     call acc_to_device(pd_c, p, mpack)
+    if (eimp_dev) then                  ! the host P lacks the eimp values: apply them on the device
+      call c_f_pointer(fd_c, fdev, [mpack])
+      call c_f_pointer(pd_c, pdev, [mpack])
+      call acc_eimp_kernel(numat, mpack, fdev, pdev, nij_d, iorbs)
+    end if
   else
     nreuse = nreuse + 1
     if (nreuse == 1) write (iw, '(a)') ' ACC DIAGG: using the device copies of F and P from the GPU Fock build'
@@ -170,6 +179,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     if (ncand > cap) then
       write (iw, '(a)') ' ACC DIAGG: candidate buffer still too small; this DIAGG1 call runs on the CPU'
       ok = .false.
+      call acc_eimp_host_fallback()
       return
     end if
     call acc_diagg1_order(ncand, nvir, ci, cj, cl, cv, nij, oldlim, fmo_dim, ifmo, fmo, nfmo_out, ijc, sumt, tiny)
