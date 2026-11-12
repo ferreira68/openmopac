@@ -29,7 +29,7 @@ subroutine outer2 (ni, nj, xi, xj, w, kr, e1b, e2a, enuc, mode, direct)
     logical :: si, sj
     integer :: icalcn = 0, i, j, k, ki, l
     double precision :: a, rij, rijx, w1, w2, w3, w4, w5, w6, w7, cutof2, enubit
-    double precision, save :: gab
+    double precision :: gab           ! output of reppd, not used here (local: no shared state under OpenMP)
     double precision, dimension (3) :: x
     double precision, dimension (7) :: wb
     double precision, dimension (22) :: ri
