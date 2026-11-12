@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
   subroutine new_esp()
     use common_arrays_C, only : coord, c, p, nat, &
@@ -476,7 +475,7 @@
 !
 !  Write out ESP data in format for Jmol
 !
-      open (iesp, file=trim(jobnam)//".grd"  , status="UNKNOWN")
+      open (iesp, file=trim(jobnam)//".grd")
       write (iesp,"(a)") " 4 Density"
       write (iesp,"(a)") " Electron density from Total SCF Density"
       write (iesp, "(i5,3f12.6)")numat, xmin, ymin, zmin
@@ -508,7 +507,7 @@
       write(iesp, "(5e13.5)") esp_array(:pij)
     end do
     else if (espgrid) then
-      open (iesp, file=trim(jobnam)//'.grd', status="UNKNOWN")
+      open (iesp, file=trim(jobnam)//'.grd')
       write (iesp, "(3f12.6)") xmin*a0, ymin*a0, zmin*a0
       write (iesp, "(i5, 3f12.6)") nnx, delx*a0, delx*a0, delx*a0
       write (iesp, "(i5, 3f12.6)") nny, dely*a0, dely*a0, dely*a0

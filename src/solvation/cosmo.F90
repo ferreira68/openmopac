@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine addfck (f, p)
     use molkst_C, only : lm61, numat, mpack
@@ -188,28 +187,6 @@ subroutine ansude (ra, rb, d, rs, ara, arb, aar, abr, arad, arbd, rinc)
     arad = pi * ra * (sad*za + sa*zad + 2.d0*ra*cad)
     arbd = pi * rb * (sbd*zb + sb*zbd + 2.d0*rb*cbd)
 end subroutine ansude
-subroutine ciint (c34, pq34)
-    use molkst_C, only : lm61
-    use cosmo_C, only : nps, cmat
-    implicit none
-    double precision, dimension (lm61), intent (in) :: c34
-    double precision, dimension (lm61), intent (inout) :: pq34
-    integer :: i, i0, j
-    i0 = 0
-    do i = 1, lm61
-      pq34(i) = 0.d0
-    end do
-    if (nps < 0) return
-    do i = 1, lm61
-      do j = 1, i - 1
-        i0 = i0 + 1
-        pq34(j) = pq34(j) + cmat(i0) * c34(i)
-        pq34(i) = pq34(i) + cmat(i0) * c34(j)
-      end do
-      i0 = i0 + 1
-      pq34(i) = pq34(i) + cmat(i0) * c34(i)
-    end do
-end subroutine ciint
 subroutine coscav
    !***********************************************************************
    !
@@ -217,16 +194,17 @@ subroutine coscav
    ! SURFACE (SAS)
    !
    !***********************************************************************
-    use molkst_C, only : numat
+    use molkst_C, only : numat, lm61, mozyme, moperr, keywrd
     use cosmo_C, only : lenabc, nps, area, isude, sude, &
        cosvol, rsolv, ioldcv, disex2, n0, dirvec, dirsm, srad, &
-       cosurf, amat, iatsp, nar_csm, nsetf, phinet, arat
+       cosurf, amat, bmat, iatsp, nar_csm, nsetf, phinet, arat
     use common_arrays_c, only : coord, nat
     use funcon_C, only : pi
     use chanel_C, only : iw
     implicit none
     integer :: i, i0, ik, ilipa, inset, ipm, ips, ix, j, jmax, jps, k, &
-   & l, nara, narea, nfl1, nfl2, niter, nps0, maxrs
+   & l, nara, narea, nfl1, nfl2, niter, nps0, maxrs, alloc_stat
+    integer(8) :: need_a
     double precision :: aa, d2, dist, dist1, dist2, dist3, fdiagr, r, ri, &
    & ri2, rj, rr, sininv, sp, spm, x1, x2, x3, x4, dists
     logical, dimension (10000) :: din ! Was 1082, but some calc'ns used more than 1082
@@ -240,9 +218,8 @@ subroutine coscav
     integer, dimension(:), allocatable :: isort, ipsrs, nipsrs, nset, nipa, &
          & lipa
     integer, dimension(:, :), allocatable :: nn
-    maxrs = 70 * numat
-    allocate (rdat(numat), rsc(4, maxrs), tm(3, 3, numat), nn(3, numat), &
-         & isort(maxrs), ipsrs(maxrs), nipsrs(lenabc), nset(1082*numat), &
+    allocate (rdat(numat), tm(3, 3, numat), nn(3, numat), &
+         & nipsrs(lenabc), nset(1082*numat), &
          & nipa(numat), dirtm(3, 1082), finel(4, 500, 2))
     if (.not. allocated(srad)) allocate(srad(numat))
     if (.not. allocated(nar_csm))  allocate(nar_csm(lenabc + 1))
@@ -275,7 +252,12 @@ subroutine coscav
         end if
       end do
     end do
-    allocate (lipa(Max(1, ilipa)))
+   ! Size the neighbor-list work arrays from the count just made. The former fixed
+   ! maxrs = 70*numat assumed at most 70 neighbors per atom within ri + rj + 2*rsolv;
+   ! dense proteins with explicit hydrogens exceed that, which stopped the job with the
+   ! misleading message "Solvent radius too large - reduce RSOLV".
+    maxrs = max(70*numat, ilipa)
+    allocate (lipa(Max(1, maxrs)), rsc(4, maxrs), isort(maxrs), ipsrs(maxrs))
     fdiagr = 2.1d0 * Sqrt (pi)
     inset = 1
     ilipa = 0
@@ -540,7 +522,7 @@ subroutine coscav
         end do
       end if
   !  Check lipa size
-      if (ilipa >= 70*numat) then
+      if (ilipa >= maxrs) then
         exit
       end if
     end do
@@ -564,6 +546,41 @@ subroutine coscav
       arat(i) = 0.d0
       rdat(i) = 0.d0
     end do
+   ! Allocate AMAT (packed nps*(nps+1)/2) and BMAT(lm61, nps) from the actual segment
+   ! count; reallocate only when a later geometry produces more segments.
+    if (.not. mozyme) then
+      if (index(keywrd, " TIMES") /= 0 .or. index(keywrd, " DEBUG") /= 0) &
+        write(iw, '(a, i0, a, i0, a)') " MOPAC COSMO: number of surface segments (NPS) = ", nps, &
+        " (worst-case LENABC = ", lenabc, ")"
+      if (nps > 65535) then
+        write(iw, '(/10x, a, i0, a)') "COSMO surface has ", nps, " segments; the packed Cholesky"
+        write(iw, '(10x, a)') "(DPPTRF, 32-bit indices) is limited to 65535. Use MOZYME or a smaller NSPA."
+        call mopend("COSMO surface has more than 65535 segments")
+        return
+      end if
+      need_a = (int(nps, 8)*(nps + 1))/2
+      if (allocated(amat)) then
+        if (size(amat, kind=8) < need_a) deallocate(amat)
+      end if
+      if (.not. allocated(amat)) then
+        allocate(amat(need_a), stat = alloc_stat)
+        if (alloc_stat /= 0) then
+          call memory_error("COSCAV (AMAT) in Cosmo")
+          return
+        end if
+      end if
+      if (allocated(bmat)) then
+        if (size(bmat, 1) < lm61 .or. size(bmat, 2) < nps) deallocate(bmat)
+      end if
+      if (.not. allocated(bmat)) then
+        allocate(bmat(lm61, nps), stat = alloc_stat)
+        if (alloc_stat /= 0) then
+          call memory_error("COSCAV (BMAT) in Cosmo")
+          return
+        end if
+      end if
+      if (moperr) return
+    end if
    ! FILLING AMAT
     do ips = 1, nps
       i = iatsp(ips)
@@ -1147,6 +1164,10 @@ subroutine mkbmat
     integer :: i, ia, idel, iden, ips, ix, nati, iii
     double precision :: ddi, dist, qqi2, rm1, rm3, rm5, dsdi, dpdi, dddi, atmp
     double precision, dimension (3) :: xa
+   ! BMAT is allocated by COSCAV from the actual segment count; if COSCAV stopped
+   ! with an error it may not exist, and nothing must be written to it.
+    if (.not. allocated(bmat)) return
+    if (size(bmat, 2) < nps) return
    ! FILLING B - MATRIX
     iden = 0
     do i = 1, numat
@@ -1750,8 +1771,8 @@ end subroutine surclo
 subroutine cosini(l_print)
     use cosmo_C, only : n0, ioldcv, fnsq, nps, rsolv, nspa, disex2, &
     dirsm, dirvec, srad, ipiden, gden, idenat, qdenet, amat, &
-    cmat, lenabc, arat, sude, isude, bh, qden, nar_csm, nsetf, phinet, &
-    qscnet, bmat, nset, xsp, abcmat, iatsp, nn, qscat, cosurf, nppa, &
+    lenabc, arat, sude, isude, qden, nar_csm, nsetf, phinet, &
+    qscnet, bmat, nset, iatsp, nn, qscat, cosurf, nppa, &
     ffact, fepsi, nden
     use common_arrays_C, only : nat, nfirst, nlast
     use molkst_C, only : numat, keywrd, moperr, lm61, mozyme, line, jobnam
@@ -1798,18 +1819,14 @@ subroutine cosini(l_print)
     if (allocated(qdenet)) deallocate (qdenet)
     if (allocated(phinet)) deallocate (phinet)
     if (allocated(qscnet)) deallocate (qscnet)
-    if (allocated(abcmat)) deallocate (abcmat)
     if (allocated(bmat))   deallocate (bmat)
-    if (allocated(cmat))   deallocate (cmat)
     if (allocated(qscat))  deallocate (qscat)
     if (allocated(srad))   deallocate (srad)
     if (allocated(iatsp))  deallocate (iatsp)
     if (allocated(nar_csm))deallocate (nar_csm)
     if (allocated(nn))     deallocate (nn)
     if (allocated(cosurf)) deallocate (cosurf)
-    if (allocated(xsp))    deallocate (xsp)
     if (allocated(nset))   deallocate (nset)
-    if (allocated(bh))     deallocate (bh)
     if (allocated(qden))   deallocate (qden)
     if (allocated(nar_csm))    deallocate (nar_csm)
     if (allocated(nsetf))  deallocate (nsetf)
@@ -1834,13 +1851,11 @@ subroutine cosini(l_print)
       return
     end if
     if (.not. mozyme) then
-      allocate(abcmat(lenabc), xsp(3, lenabc), nset(nppa*numat), bh(lenabc), stat = j)
-      allocate(bmat(lm61, lenabc), stat = i)
-      j = j + i
-      allocate(amat((lenabc*(lenabc + 1))/2), stat = i)
-      j = j + i
-      allocate(cmat((lm61*(lm61 + 1))/2), stat = i)
-      j = j + i
+!     AMAT and BMAT are no longer allocated here. Sizing them for the worst case,
+!     lenabc = nspa*numat segments, overflowed 32-bit sizes and needed ~200 GB for a
+!     ~5,000-atom protein, while the actual surface had ~4% of that many segments.
+!     They are now allocated in COSCAV from the actual segment count, NPS.
+      allocate(nset(nppa*numat), stat = j)
       if (j /= 0) then
         if (l_print) then
           write(line, '(a, i5, a)')"Data set '"//trim(jobnam)//"' exists, "
@@ -1856,7 +1871,6 @@ subroutine cosini(l_print)
         call memory_error("COSINI (2) in Cosmo")
         return
       end if
-      cmat = 0.d0
     end if
     call extvdw (usevdw, rvdw)
     if (moperr) return

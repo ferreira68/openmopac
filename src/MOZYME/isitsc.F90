@@ -1,30 +1,30 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
-subroutine isitsc (escf, selcon, emin, iemin, iemax, okscf, niter, itrmax)
-    use molkst_C, only: iscf
+subroutine isitsc (escf, selcon, emin, iemin, iemax, okscf, niter, itrmax, tstart)
+    use molkst_C, only: iscf, iflepo, tleft, keywrd
     use MOZYME_C, only : ovmax, energy_diff
     implicit none
     logical, intent (out) :: okscf
     integer, intent (in) :: itrmax, niter
     integer, intent (inout) :: iemax, iemin
-    double precision, intent (in) :: emin, escf, selcon
-    logical :: scf1 = .false.
+    double precision, intent (in) :: emin, escf, selcon, tstart
+    double precision, external :: seconds
+    logical :: scf1 = .false., tlimit
     integer :: i, iemax1, iemin1
-    double precision :: energy_test, fmo_test
+    double precision :: energy_test, fmo_test, tnow
     double precision, dimension (10) :: escf0
     data escf0 / 10 * 0.d0 /
     save
@@ -35,11 +35,18 @@ subroutine isitsc (escf, selcon, emin, iemin, iemax, okscf, niter, itrmax)
     energy_test = selcon
     fmo_test = selcon * 5.0d0
 
+    tlimit = index(keywrd,' CYCLES') + index(keywrd,' BIGCYCLES') == 0
+    tnow = seconds(2)
     if (ovmax < fmo_test .and. Abs (energy_diff) < energy_test &
-         & .and. scf1 .or. niter > itrmax) then
+         & .and. scf1 .or. niter > itrmax &
+         & .or. (tlimit .and. tnow - tstart >= tleft)) then
       okscf = .true.
-      iscf = 2
-      if (scf1) iscf = 1
+      if (scf1) then
+        iscf = 1
+      else
+        iscf = 2
+        iflepo = 9
+      end if
     else
       scf1 = (ovmax < fmo_test .and. Abs (energy_diff) < energy_test)
       if (emin /= 0.d0) then

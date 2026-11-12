@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine geochk ()
 !***********************************************************************
@@ -43,7 +42,7 @@ subroutine geochk ()
 !
     use molkst_C, only: natoms, numat, nelecs, keywrd, moperr, maxtxt, mozyme, &
       maxatoms, line, nalpha, nbeta, uhf, nclose, nopen, norbs, numcal, id, &
-      ncomments, numat_old, nvar, prt_coords, prt_topo, allkey, txtmax, pdb_label
+      ncomments, numat_old, nvar, prt_coords, prt_topo, allkey, txtmax, pdb_label, use_disk
     use chanel_C, only: iw, iarc, archive_fn, log, ilog
     use atomradii_C, only: atom_radius_covalent
     use parameters_C, only : ams, natorb, tore, main_group
@@ -1042,7 +1041,7 @@ subroutine geochk ()
         i = iarc
         inquire(unit=i, opened=opend)
         if (opend) close(i, status = 'keep', iostat=j)
-        open(unit=i, file=line, status='UNKNOWN', position='asis')
+        open(unit=i, file=line)
         rewind i
         call pdbout(i)
         close (i)
@@ -1051,7 +1050,7 @@ subroutine geochk ()
         line = archive_fn(:len_trim(archive_fn) - 3)//"arc"
         inquire(unit=iarc, opened=opend)
         if (opend) close(iarc, status = 'keep', iostat=i)
-        open(unit=iarc, file=line, status='UNKNOWN', position='asis')
+        open(unit=iarc, file=line)
         rewind iarc
         call geout (iarc)
       end if
@@ -1479,10 +1478,11 @@ subroutine geochk ()
 ! Find the first free unit, and use that number for the scratch file
 !
                     do m = 10, 100
+                      if (.not. use_disk) exit
                       inquire(unit=m, opened = opend)
                       if (.not. opend) then
-                      open(unit=m, status='SCRATCH')
-                      exit
+                        open(unit=m, status='SCRATCH')
+                        exit
                       end if
                     end do
                   end if
@@ -1497,11 +1497,11 @@ subroutine geochk ()
                       header = .false.
                     end if
                     write(iw,'(a)')trim(line)
-                    else
+                  else
 !
 ! Store text of ions with a charge of +1
 !
-                  write(m,'(a)')trim(line)
+                    if (use_disk) write(m,'(a)')trim(line)
                   end if
                   if (log) write(ilog,'(a)')trim(line)
                 end if
@@ -1526,7 +1526,7 @@ subroutine geochk ()
 !
 !  Write out ions that have a charge of -1
 !
-            rewind (m)
+            if (use_disk) rewind (m)
             if (header) then
               if (maxtxt < 2) then
                     write(iw,'(10x, a, /)') "All other ions"
@@ -1536,13 +1536,15 @@ subroutine geochk ()
                   end if
               header = .false.
             end if
-            do k = 1, 10000
-              read(m,'(a)', iostat = ii)line
-              if (ii /= 0) exit
-              if (k == 1) write(iw,*)
-              write(iw, '(a)')trim(line)
-            end do
-            close (m)
+            if (use_disk) then
+              do k = 1, 10000
+                read(m,'(a)', iostat = ii)line
+                if (ii /= 0) exit
+                if (k == 1) write(iw,*)
+                write(iw, '(a)')trim(line)
+              end do
+              close (m)
+            end if
           end if
         end do
       end if
@@ -1582,7 +1584,7 @@ subroutine geochk ()
       archive_fn = archive_fn(:len_trim(archive_fn) - 3)//"arc"
       inquire(unit=iarc, opened=opend)
       if (opend) close(iarc, status = 'keep', iostat=i)
-      open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis')
+      open(unit=iarc, file=archive_fn)
       rewind iarc
       if (index(keywrd, " PDBOUT") /= 0) call delete_ref_key("PDBOUT", len_trim("PDBOUT"), ' ', 1)
       call geout (iarc)
@@ -1592,7 +1594,7 @@ subroutine geochk ()
         i = iarc
         inquire(unit=i, opened=opend)
         if (opend) close(i)
-        open(unit=i, file=line, status='UNKNOWN', position='asis')
+        open(unit=i, file=line)
         rewind i
         coord(:,:numat) = geo(:,:numat)
         call update_txtatm(.true., .true.)
@@ -1642,7 +1644,7 @@ subroutine geochk ()
           archive_fn = archive_fn(:len_trim(archive_fn) - 3)//"arc"
           inquire(unit=iarc, opened=opend)
           if (opend) close(iarc, status = 'keep', iostat=i)
-          open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis')
+          open(unit=iarc, file=archive_fn)
           rewind iarc
           if (index(keywrd, " PDBOUT") /= 0) call delete_ref_key("PDBOUT", len_trim("PDBOUT"), ' ', 1)
           call geout (iarc)
@@ -1742,7 +1744,7 @@ subroutine geochk ()
       if (index(keywrd, "0SCF") + index(keywrd, " RESEQ") == 0 .or. &
          index(keywrd, " PDBOUT") == 0) then
         inquire(unit=iarc, opened=opend)
-        if ( .not. opend) open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis')
+        if ( .not. opend) open(unit=iarc, file=archive_fn)
         rewind(iarc)
         call geout (iarc)
       end if

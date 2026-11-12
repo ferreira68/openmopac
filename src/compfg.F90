@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine compfg(xparam, int, escf, fulscf, grad, lgrad)
 !-----------------------------------------------
@@ -66,7 +65,7 @@
       integer :: icalcn, i, j, k, l
       double precision, dimension(3) :: degree
       double precision :: angle, atheat_store, sum, store_e_disp
-      double precision, external ::  nsp2_correction, Si_O_H_correction
+      double precision, external ::  nsp2_correction, Si_O_H_correction, C_triple_bond_C
       double precision, external :: helecz
       logical :: debug, print, large, usedci, force, times, aider, &
         dh, l_locate_ts
@@ -122,7 +121,11 @@
         sum_dihed = 0.d0
         if (iseps) then
           iseps = .true.
-          noeps = .true.
+!         By default the first SCF is run in the gas phase and COSMO is switched on only
+!         after it converges (the gas-phase density is just the starting guess). NOGASSCF
+!         starts the SCF in solvent instead, for systems whose gas-phase SCF does not
+!         converge (e.g. heavily ionized proteins).
+          noeps = (index(keywrd, " NOGASSCF") == 0)
           call cosini(.true.)
           if (moperr) return
           mozyme = (index(keywrd," MOZ") + index(keywrd," LOCATE-TS") + index(keywrd," RAPID") /= 0)
@@ -199,10 +202,11 @@
           call coscavz(coord, nat)
         else
           call coscav
+          if (moperr) return   ! COSCAV allocates BMAT; do not call MKBMAT after it fails
           call mkbmat
         end if
         if (moperr) return
-        if (noeps) useps = .false.
+        useps = .not. noeps   ! default first call: gas phase; later calls or NOGASSCF: COSMO
       end if
       if (index(keywrd,' HCORE') /= 0) call prtpar
       if (times) call timer ('BEFORE HCORE')
@@ -351,87 +355,94 @@
 !
 ! COMPUTE THE HEAT OF FORMATION.
 !
-      if (norbs > 0 .and. nelecs > 0) then
 !
 !  Put any ad-hoc corrections to the HoF here, so they will show up if PL
 !  is used
 !
-        hpress = 0.d0
-        if (Abs (pressure) > 1.d-4) then
-          if (id == 1) then
-            hpress = -pressure * Sqrt (dot(tvec(1, 1), tvec(1, 1), 3))
-          else if (id == 3) then
-            hpress = -pressure * volume (tvec, 3)
-          end if
-          atheat = atheat + hpress
+      hpress = 0.d0
+      if (Abs (pressure) > 1.d-4) then
+        if (id == 1) then
+          hpress = pressure * Sqrt (dot(tvec(1, 1), tvec(1, 1), 3))
+        else if (id == 3) then
+          hpress = pressure * volume (tvec, 3)
         end if
-        if (useps .and. .not. mozyme) atheat = atheat + solv_energy * fpc_9
+        atheat = atheat + hpress
+      end if
+      if (useps .and. .not. mozyme) atheat = atheat + solv_energy * fpc_9
 !
 !  Add in any molecular-mechanics type corrections here
 !
-        if (method_pm6 .and. N_3_present) then
-          nsp2_corr = nsp2_correction()
-          atheat = atheat + nsp2_corr
-        end if
-        if (method_pm7 .and. Si_O_H_present) then
-          Si_o_H_corr = Si_O_H_correction()
-          atheat = atheat + Si_O_H_corr
-        end if
-        call setup_nhco(i)
-        sum_dihed = 0.d0
-        do i = 1, nnhco
-          call dihed (coord, nhco(1,i), nhco(2,i), nhco(3,i), nhco(4,i), angle)
-          sum_dihed = sum_dihed + htype*sin(angle)**2
-        end do
-        atheat = atheat + sum_dihed
-        stress = 0.d0
-        if(use_ref_geo) then
-          do i = 1, numat
-            do j = 1,3
-              stress = stress + (geo(j,i) - geoa(j,i))**2
-            end do
+      atheat = atheat + C_triple_bond_C()
+      if (method_pm6 .and. N_3_present) then
+        nsp2_corr = nsp2_correction()
+        atheat = atheat + nsp2_corr
+      end if
+      if (method_pm7 .and. Si_O_H_present) then
+        Si_o_H_corr = Si_O_H_correction()
+        atheat = atheat + Si_O_H_corr
+      end if
+      call setup_nhco(i)
+      sum_dihed = 0.d0
+      do i = 1, nnhco
+        call dihed (coord, nhco(1,i), nhco(2,i), nhco(3,i), nhco(4,i), angle)
+        sum_dihed = sum_dihed + htype*sin(angle)**2
+      end do
+      atheat = atheat + sum_dihed
+      stress = 0.d0
+      if(use_ref_geo) then
+        do i = 1, numat
+          do j = 1,3
+            stress = stress + (geo(j,i) - geoa(j,i))**2
           end do
-        end if
-        if (dh) then
-          call post_scf_corrections(sum, .false.)
-          if (moperr) return
-          atheat =  sum + atheat
-        end if
-        if (times) call timer ('BEFORE ITER')
-        if (int) then
+        end do
+      end if
+      if (dh) then
+        call post_scf_corrections(sum, .false.)
+        if (moperr) return
+        atheat =  sum + atheat
+      end if
+      if (times) call timer ('BEFORE ITER')
+      if (int) then
+        if (norbs > 0 .and. nelecs > 0) then
           if (mozyme) then
             call iter_for_MOZYME (elect)
+            call acc_pin_end()   ! unpin host arrays pinned for GPU transfers
           else
             call iter (elect, fulscf, .TRUE.)
           end if
-          if (moperr) return
-          if (noeps) then
-            noeps = .false.
-            useps = .true.
-            if ( .not. mozyme) then
-              if (.not. method_indo) call hcore ()
-              if (method_indo) then
-                call addnuc ()
-                call addhcr ()
-                do i= 1,mpack
-                  beta(i) = h(i)
-                end do
-              end if
-              call iter (elect, fulscf, .TRUE.)
-            end if
-          end if
-        else
-          if (mozyme) then
-             call buildf (f, partf, 0)
-             elect = helecz()
-           end if
         end if
-        stress = stress*density
-        atheat = atheat + stress
         if (moperr) return
-        if (times) call timer ('AFTER  ITER')
+        if (noeps) then
+          noeps = .false.
+          useps = .true.
+          if ( .not. mozyme) then
+            if (.not. method_indo) call hcore ()
+            if (method_indo) then
+              call addnuc ()
+              call addhcr ()
+              do i= 1,mpack
+                beta(i) = h(i)
+              end do
+            end if
+            if (norbs > 0 .and. nelecs > 0) call iter (elect, fulscf, .TRUE.)
+          end if
+        end if
       else
+        if (mozyme .and. norbs > 0 .and. nelecs > 0) then
+          call buildf (f, partf, 0)
+          elect = helecz()
+        end if
+      end if
+      stress = stress*density
+      atheat = atheat + stress
+      if (moperr) return
+      if (times) call timer ('AFTER  ITER')
+      if (nelecs == 0) then
         elect = 0.D0
+        f = h
+        if (useps .and. .not. mozyme) then
+          call addfck (f, p)
+        end if
       end if
       escf = (elect + enuclr)*fpc_9 + atheat
       if (useps .and. mozyme) then
@@ -453,10 +464,11 @@
       if (lgrad) then
         store_e_disp = e_disp
         if (times) call timer ('Before DERIV')
-        if (nelecs > 0) call deriv (geo, grad)
+        call deriv (geo, grad)
         if (moperr) return
         if (times) call timer ('AFTER  DERIV')
         e_disp = store_e_disp
+        if (id == 3 .and. nvar == 3*natoms) call calculate_voigt()
       end if
       if (aider) then
 !

@@ -1,22 +1,21 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine gettxt
       use chanel_C, only: ir, iw, isetup, input_fn
-      use molkst_C, only: keywrd, keywrd_quoted, koment, title, refkey, gui, numcal, line, &
+      use molkst_C, only: keywrd, keywrd_quoted, koment, title, refkey, numcal, numcal0, line, &
         moperr, allkey, backslash
       implicit none
 !-----------------------------------------------
@@ -107,13 +106,13 @@
         if (.not. exists) then
           if (setup_present .and. .not. zero_scf) then
             write (line, '(A)') "SETUP FILE """//trim(filen)//""" MISSING."
-            numcal = 2
-            if (.not. gui )write(0,'(//30x,a)')' SETUP FILE "'//trim(filen)//'" MISSING'
+            numcal = 2+numcal0
+            write(0,'(//30x,a)')' SETUP FILE "'//trim(filen)//'" MISSING'
             call mopend (trim(line))
             return
           end if
         else
-          open(unit=isetup, file=filen, status='UNKNOWN', form='FORMATTED',position='REWIND', iostat=i)
+          open(unit=isetup, file=filen, form='FORMATTED',position='REWIND', iostat=i)
           if (i /= 0) then
             if (.not. zero_scf) then
               call mopend ('COULD NOT OPEN SETUP FILE: '//trim(filen))
@@ -316,8 +315,7 @@
           end if
           keywrd(i:i+6) = " "
           call add_path(filen)
-          open(unit=isetup, file=filen, status='UNKNOWN', form='FORMATTED', &
-            position='REWIND')
+          open(unit=isetup, file=filen, form='FORMATTED', position='REWIND')
           rewind isetup
           read (isetup, '(A)', end=30, err=30) refkey(2)
           close(isetup)
@@ -375,8 +373,7 @@
             keywrd(i:i + 6) = " "
           end if
           call add_path(filen)
-          open(unit=isetup, file=filen, status='UNKNOWN', form='FORMATTED', &
-            position='REWIND')
+          open(unit=isetup, file=filen, form='FORMATTED', position='REWIND')
           rewind isetup
           read (isetup, '(A)', end=39, err=40) keywrd(len_trim(keywrd) + 2:)
 39        close (isetup)
@@ -401,7 +398,7 @@
       go to 60
 50    continue
       if (zero_scf) go to 60
-      numcal = 2
+      numcal = 2+numcal0
       call mopend ('SETUP FILE "'//trim(filen)//'" MISSING')
       write(iw,'(a)') " (Setup file name: '"//trim(filen)//"')"
       return
@@ -411,7 +408,7 @@
 100   continue
       call split_keywords(oldkey)
       
-      if (numcal > 1) then
+      if (numcal > 1+numcal0) then
         if (index(keywrd,"OLDGEO") /= 0) return ! User forgot to add extra lines for title and comment
         if (aux) keywrd = " AUX"
         line = "JOB ENDED NORMALLY"

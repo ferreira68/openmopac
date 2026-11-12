@@ -1,25 +1,24 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine prtdrc(deltt, xparam, ref, escf, ekin, gtot, etot, velo0, mcoprt, ncoprt, parmax, &
           l_dipole, dip)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
-      USE molkst_C, only : numat, keywrd, numcal, nvar, jloop => itemp_1, line
+      USE molkst_C, only : numat, keywrd, numcal, nvar, jloop => itemp_1, line, use_disk
       use common_arrays_C, only : nat, na, nb, nc, p, na_store, geoa, loc
       USE parameters_C, only : tore
       use chanel_C, only : iw, ires
@@ -594,8 +593,10 @@
       told2 = told1
       told1 = deltat
       iloop = iloop + 1
-      endfile (iw)
-      backspace (iw)
+      if (use_disk) then
+        endfile (iw)
+        backspace (iw)
+      end if
       na = 0
       return
       end subroutine prtdrc

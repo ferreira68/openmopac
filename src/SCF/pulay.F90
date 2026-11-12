@@ -1,28 +1,27 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine pulay(f, p, n, fppf, fock, emat, lfock, nfock, msize, start, pl)
       use chanel_C, only : iw
       use molkst_C, only : numcal, keywrd, mpack, npulay
-      use Common_arrays_C, only : workmat1, workmat2, workmat3
+      use iter_C, only : pulay_work1, pulay_work2, pulay_work3
       implicit none
       integer  :: n
       integer , intent(inout) :: lfock
       integer , intent(inout) :: nfock
-      integer , intent(in) :: msize
+      integer(8) , intent(in) :: msize
       double precision , intent(out) :: pl
       logical , intent(inout) :: start
       double precision  :: f(mpack)
@@ -31,7 +30,9 @@
       double precision , intent(inout) :: fock(*)
       double precision , intent(inout) :: emat(npulay+1,npulay+1)
 !
-      integer :: icalcn, maxlim, linear, mfock, lbase, i, nfock1, j, l, il, ii
+      integer :: icalcn, maxlim, mfock, i, nfock1, j, l, il
+!     64-bit: offsets into the npulay*mpack history arrays exceed 2**31 above N_AO ~ 20,700
+      integer(8) :: linear, lbase, ii
       double precision, dimension((npulay+1)**2) :: evec
       double precision, dimension(npulay) :: coeffs
       double precision :: const, d, sum
@@ -70,9 +71,8 @@
         debug = index(keywrd,'DEBUGPULAY') /= 0
       end if
       if (start) then
-        linear = (n*(n + 1))/2
-        mfock = msize/linear
-        mfock = min0(maxlim,mfock)
+        linear = (int(n,8)*(n + 1))/2
+        mfock = int(min(int(maxlim,8), msize/linear))
         if (debug) write (iw, '('' MAXIMUM SIZE:'',I5)') mfock
         nfock = 1
         lfock = 1
@@ -95,10 +95,10 @@
 !
 !      call mamult (p, f, fppf(lbase+1), n, 0.D0)
 !      call mamult (f, p, fppf(lbase+1), n, -1.D0)
-      call unpack_matrix(p, workmat1, n)
-      call unpack_matrix(f, workmat2, n)
-      call sym_commute(workmat1, workmat2, workmat3, n)
-      call pack_matrix(workmat3, fppf(lbase+1), n)
+      call unpack_matrix(p, pulay_work1, n)
+      call unpack_matrix(f, pulay_work2, n)
+      call sym_commute(pulay_work1, pulay_work2, pulay_work3, n)
+      call pack_matrix(pulay_work3, fppf(lbase+1), n)
 !
 !   FPPF NOW CONTAINS THE RESULT OF FP - PF.
 !
@@ -106,7 +106,7 @@
       do i = 1, nfock
         emat(nfock1,i) = -1.D0
         emat(i,nfock1) = -1.D0
-        emat(lfock,i) = ddot(linear,fppf((i-1)*linear+1),1,fppf(lbase+1),1)
+        emat(lfock,i) = ddot(int(linear),fppf((i-1)*linear+1),1,fppf(lbase+1),1)
         emat(i,lfock) = emat(lfock,i)
       end do
       pl = emat(lfock,lfock)/linear
@@ -157,7 +157,7 @@
       do i = 1, linear
         sum = 0.D0
         l = 0
-        ii = (i - 1)*mfock
+        ii = (int(i,8) - 1)*mfock
         do j = 1, nfock
           sum = sum + coeffs(j)*fock(j+ii)
         end do

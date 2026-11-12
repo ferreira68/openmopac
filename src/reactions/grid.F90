@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
     subroutine grid
 !-----------------------------------------------
@@ -27,7 +26,7 @@
       use elemts_C, only : elemnt
 !
       use molkst_C, only : nvar, keywrd, tleft, line, norbs, &
-      natoms, moperr, uhf, numat, mpack, gui
+      natoms, moperr, uhf, numat, mpack
 !
       use maps_C, only : rxn_coord1, rxn_coord2, ione, ijlp, ilp, jlp, jlp1, surf, &
       lpara1, latom1, lpara2, latom2
@@ -47,7 +46,7 @@
       character :: formt*4, num*1
       logical :: restrt, useef, opend, minimize_energy_in_grid = .false., use_p
       double precision, dimension (:), allocatable :: all_points1, all_points2
-      double precision, dimension (:,:), allocatable ::  xy, surfac, all_pa, all_pb
+      double precision, dimension (:,:), allocatable ::  xy, surfac
       double precision, dimension (:,:,:), allocatable :: all_geo
       integer, dimension (:,:,:), allocatable :: all_nabc
       character :: txt*1
@@ -156,7 +155,6 @@
       end if
       allocate (all_nabc(i,3,natoms), all_points1(i), all_points2(i), &
               & all_geo(i,3,natoms))
-      allocate (all_pa(i,mpack), all_pb(i,j), stat = k)
       use_p = (i == 0)
       surf = 1.d9
       if (lpara1 /= 1 .and. na(latom1) > 0) then
@@ -171,8 +169,7 @@
       end if
       cputot = 0.d0
       if (restrt) then
-          open(unit=ires, file=restart_fn, status='UNKNOWN', form='UNFORMATTED', &
-          position='asis', iostat = io_stat)
+          open(unit=ires, file=restart_fn, form='UNFORMATTED', iostat = io_stat)
           if (io_stat /= 0) then
             call mopend ("Restart file either does not exist or is not available for reading")
             return
@@ -274,14 +271,6 @@
             all_nabc(k,2,i) = nb(i)
             all_nabc(k,3,i) = nc(i)
           end do
-          if (gui) then
-            if (use_p) then
-              all_pa(k,:mpack) = pa(:mpack)
-              if (uhf) then
-                all_pb(k,:mpack) = pb(:mpack)
-              end if
-            end if
-          end if
           write (line, '('' :'',F16.5,F16.5,F21.6, i10,i5)') &
             geo(lpara1,latom1)*c1, geo(lpara2,latom2)*c2, escf, &
             loop , big_loop - loop
@@ -308,8 +297,7 @@
           if (tleft < 0.d0) then
             inquire(unit=ires, opened=opend)
             if (.not. opend) &
-              open(unit=ires, file=restart_fn, status='UNKNOWN', form='UNFORMATTED', &
-              position='asis', iostat = io_stat)
+              open(unit=ires, file=restart_fn, form='UNFORMATTED', iostat = io_stat)
 !
 !  Save everything that would be needed by GRID when the job is restarted.
 !
@@ -371,33 +359,6 @@
               write (iw, '(I4,3X,A2,3x, 3F16.9)') l, elemnt(labels(i)), (coord(k,l),k=1,3) 
             end do
           end if
-          if (gui) then
-            if (use_p) then
-              ij = 0
-              do i = 1, norbs
-                do j = 1, i
-                ij = ij + 1
-                pa(ij) = all_pa(k,ij)
-                end do
-              end do
-              if (uhf) then
-                ij = 0
-                do i = 1, norbs
-                  do j = 1, i
-                  ij = ij + 1
-                  pb(ij) = all_pb(k,ij)
-                  end do
-                end do
-              else
-                pa = 0.d0
-                pb = 0.d0
-              end if
-              p = pa + pb
-            else
-              p = 2*pa
-            end if
-            call bonds()
-          end if
         end do
       end do
       write (iw, "(/10x,'HORIZONTAL: VARYING SECOND PARAMETER,',/10x, &
@@ -409,7 +370,7 @@
       if (opend) then
         close (unit=iarc, status="KEEP")
       end if
-      open (unit=iarc, file=archive_fn, status="UNKNOWN")
+      open (unit=iarc, file=archive_fn)
 10000 format (" ARCHIVE FILE FOR GRID CALCULATION"/"GRID OF HEATS" /)
       write (iarc, 10000)
       call wrttxt (iarc)
@@ -432,7 +393,7 @@
       end if
       write(iw  ,'('//num//'x,1000f'//formt//')') ((geo22 + (j - 1)*step2)*c2,j=1,npts2)
       write(iarc,'('//num//'x,1000f'//formt//')') ((geo22 + (j - 1)*step2)*c2,j=1,npts2)
-      open(unit=iump, file=ump_fn, status='UNKNOWN', position='asis')
+      open(unit=iump, file=ump_fn)
       do i = 1, npts1
         write (iw,   '(1000f'//formt//')') (geo11 + (i - 1)*step1)*c1, (surfac(j,i),j=1,npts2)
         write (iarc, '(1000f'//formt//')') (geo11 + (i - 1)*step1)*c1, (surfac(j,i),j=1,npts2)

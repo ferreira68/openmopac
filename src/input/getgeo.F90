@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine getgeo(iread, labels, geo, xyz, lopt, na, nb, nc, int)
 !-----------------------------------------------
@@ -22,7 +21,7 @@
       use parameters_C, only : ams
 !
       use molkst_C, only : natoms, keywrd, numat, maxtxt, line, moperr, &
-        numcal, id, units, Angstroms, arc_hof_1, arc_hof_2, keywrd_txt, pdb_label
+        numcal, numcal0, id, units, Angstroms, arc_hof_1, arc_hof_2, keywrd_txt, pdb_label
 !
       use chanel_C, only : iw, ir, input_fn, end_fn, iend
 !
@@ -162,11 +161,11 @@
       if (line == '$end') go to 20
       if (line(1:1) == '*') go to 20
       if (line == ' ') then
-        if(natoms == 0 .and. numcal == 1) then
+        if(natoms == 0 .and. numcal == 1+numcal0) then
 !
 !  Check:  Is this an ARC file?
 !
-          numcal = 2
+          numcal = 2+numcal0
           rewind (iread)
           sum = 0.d0
           do i = 1, 10000
@@ -572,7 +571,7 @@
           write(iw,'(/10x,a,i5)')"Faulty atom:", natoms
           write(iw,'(/10x,a)')"Faulty line: """//trim(line)//""""
           call mopend("Unless MINI is used, optimization flags must be 1, 0, or -1")
-          numcal = 2
+          numcal = 2+numcal0
           if ((lopt(1,natoms) > 10 .or. lopt(2,natoms) > 10 .or. lopt(3,natoms) > 10) .and. natoms > 1) &
             write(iw,'(/10x,a)')" If the geometry is in Gaussian format, add keyword ""AIGIN"" and re-run"
           return
@@ -626,7 +625,7 @@
 !***********************************************************************
   120 continue
       if (natoms == 0) then
-        if (numcal == 1) call mopend (' Error detected while reading geometry')
+        if (numcal == 1+numcal0) call mopend (' Error detected while reading geometry')
         return
       end if
       if ( .not. Angstroms) then
@@ -756,7 +755,7 @@
         if (exists) close(ir, status = 'delete', err = 99)
         inquire (file = end_fn, exist = exists)
         if (exists) then
-          open(unit=iend, file=end_fn, status='UNKNOWN', position='asis', iostat=j)
+          open(unit=iend, file=end_fn, iostat=j)
           close(iend, status = 'delete', iostat=j)
         end if
 99      stop
@@ -793,6 +792,7 @@
             k = k + lopt(j,i)
           end do
         end do
+        j = na(3)
 !
 !  Get rid of dummy atoms
 !
@@ -811,7 +811,7 @@
 !   If everything is marked for optimization then unconditionally mark the first
 !   three atoms for optimization
 !
-        if (k >= 3*numat - 6) lopt(:,:min(3, numat)) = 1
+        if (k >= 3*numat - 6 .and. j /= 0) lopt(:,:min(3, numat)) = 1
         natoms = numat
         if (saddle .or. (index(keywrd, " LOCATE-TS") /= 0)) then
           if (index(keywrd, " LOCATE-TS") == 0) lopt(:,:numat) = 1  ! In a saddle calculation, all parameters must be optimizable.

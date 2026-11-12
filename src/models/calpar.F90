@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
     subroutine calpar
 !-----------------------------------------------
@@ -29,6 +28,7 @@
 #if MOPAC_F2003
       USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
       implicit none
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
@@ -273,7 +273,7 @@
     write (i, '(//10x, a, /)')" A new file called '"//trim(file_name)//"' will be written"
     call add_path(file_name)
     j = 0
-97  open (unit=param_out, file=trim(file_name), status="UNKNOWN", iostat=i)
+97  open (unit=param_out, file=trim(file_name), iostat=i)
     if ( i /= 0 .and. j < 10)then
 !
 !  The file can exist, but is not currently accessible
@@ -286,21 +286,20 @@
     if (j > 9) return
     rewind (param_out)
     write (param_out,"(a)") "! Molecular Orbital PACkage (MOPAC)"
-    write (param_out,"(a)") "! Copyright (C) 2021, Virginia Polytechnic Institute and State University"
+    write (param_out,"(a)") "! Copyright 2021 Virginia Polytechnic Institute and State University"
     write (param_out,"(a)") "!"
-    write (param_out,"(a)") "! MOPAC is free software: you can redistribute it and/or modify it under"
-    write (param_out,"(a)") "! the terms of the GNU Lesser General Public License as published by"
-    write (param_out,"(a)") "! the Free Software Foundation, either version 3 of the License, or"
-    write (param_out,"(a)") "! (at your option) any later version."
+    write (param_out,"(a)") '! Licensed under the Apache License, Version 2.0 (the "License");'
+    write (param_out,"(a)") "! you may not use this file except in compliance with the License."
+    write (param_out,"(a)") "! You may obtain a copy of the License at"
     write (param_out,"(a)") "!"
-    write (param_out,"(a)") "! MOPAC is distributed in the hope that it will be useful,"
-    write (param_out,"(a)") "! but WITHOUT ANY WARRANTY; without even the implied warranty of"
-    write (param_out,"(a)") "! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the"
-    write (param_out,"(a)") "! GNU Lesser General Public License for more details."
+    write (param_out,"(a)") "!    http://www.apache.org/licenses/LICENSE-2.0"
     write (param_out,"(a)") "!"
-    write (param_out,"(a)") "! You should have received a copy of the GNU Lesser General Public License"
-    write (param_out,"(a)") "! along with this program.  If not, see <https://www.gnu.org/licenses/>."
-    write (param_out,"(a)") " "
+    write (param_out,"(a)") "! Unless required by applicable law or agreed to in writing, software"
+    write (param_out,"(a)") '! distributed under the License is distributed on an "AS IS" BASIS,'
+    write (param_out,"(a)") "! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied."
+    write (param_out,"(a)") "! See the License for the specific language governing permissions and"
+    write (param_out,"(a)") "! limitations under the License."
+    write (param_out,"(a)") ""
     write (param_out,"(a)") "  module Parameters_for_PM"//name_1(:l1)//"_C"
     write (param_out,"(a)") "    double precision, dimension(107) :: uss"//name_2(:l2)//", upp"//name_2(:l2)//", udd" &
       //name_2(:l2)//", zs"//name_2(:l2)//", zp"//name_2(:l2)//", zd"//name_2(:l2)//", betas"//name_2(:l2)//", &"

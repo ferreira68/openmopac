@@ -1,31 +1,30 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine  writmo
       use cosmo_C, only : iseps, area, fepsi, cosvol, ediel, solv_energy
 !
       use molkst_C, only : numat, nclose, nopen, fract, nalpha, nelecs, nbeta, &
-      & norbs, nvar, gnorm, iflepo, enuclr,elect, ndep, nscf, numcal, escf, &
+      & norbs, nvar, gnorm, iflepo, enuclr,elect, ndep, nscf, numcal, numcal0, escf, &
       & keywrd, os, verson, time0, moperr, last, iscf, id, pressure, mol_weight, &
       jobnam, line, mers, uhf, method_indo, &
       density, formula, mozyme, mpack, stress, &
       sz, ss2, maxtxt, E_disp, E_hb, E_hh, l_normal_html, &
       no_pKa, nalpha_open, nbeta_open, use_ref_geo, N_Hbonds, caltyp, &
       hpress, nsp2_corr, Si_O_H_corr, sum_dihed, atheat, &
-      prt_gradients, prt_coords, prt_cart, prt_pops, prt_charges, pdb_label, backslash, gui
+      prt_gradients, prt_coords, prt_cart, prt_pops, prt_charges, pdb_label, backslash
 !
       use MOZYME_C, only : icocc, icvir, ncocc, ncvir, nvirtual, noccupied, &
       & nnce, nncf, cocc, cvir, ncf, nce,  cocc_dim, &
@@ -54,13 +53,14 @@
       USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
 !-----------------------------------------------
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
       implicit none
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
 
       double precision ::  gcoord(3,numat)
-      double precision, dimension (:), allocatable :: rxyz
+      double precision, dimension (:), allocatable :: rxyz, popmat
       integer :: icalcn, i, loc11, loc21, nopn, j, k, l, m, kchrge, iwrite, mvar
       double precision :: q2(numat), degree, xreact, eionis, vol, tim, xi, sum, &
       dip, dumy(3), pKa_unsorted(numat), distortion, rms, gnorm_norm, escf_min
@@ -153,6 +153,14 @@
         write (iw, '(A)') ' '
         write (iw, '(A)') &
           ' CHECK YOUR GEOMETRY AND ALSO TRY USING SHIFT OR PULAY. '
+        write (iw, '(A)') ' '
+        write (iw, '(A)') &
+          ' CLOSED-SHELL ORGANIC MOLECULES SHOULD HAVE GOOD SCF CONVERGENCE, '
+        write (iw, '(A)') &
+          ' CHECK THEIR TOTAL CHARGE WITH THE ''LEWIS'' KEYWORD, '
+        write (iw, '(A)') &
+          ' AND CHECK THEIR PROTONATION WITH THE ''ADD-H'' KEYWORD. '
+        write (iw, '(A)') ' '
         call geout (1)
         call mopend ('THE SCF CALCULATION FAILED.')
         return
@@ -162,9 +170,9 @@
       ! Remove energy term arising from the external pressure,
       !
         if( id == 1) then
-          escf = escf + pressure * dsqrt(dot(tvec(1,1), tvec(1,1),3))
+          escf = escf - pressure * dsqrt(dot(tvec(1,1), tvec(1,1),3))
         else if (id == 3) then
-          escf = escf + pressure * volume(tvec,3)
+          escf = escf - pressure * volume(tvec,3)
         end if
       end if
       if (use_ref_geo) then
@@ -281,13 +289,13 @@
       hpress = 0.d0
       if (Abs (pressure) > 1.d-4) then
         if (id == 1) then
-          hpress = -pressure * dsqrt (dot(tvec(1, 1), tvec(1, 1), 3))
+          hpress = pressure * dsqrt (dot(tvec(1, 1), tvec(1, 1), 3))
         else if (id == 3) then
           sum =  volume (tvec, 3)
-          hpress = -pressure * sum
+          hpress = pressure * sum
           write (iw, '(    10X,''ENERGY DUE TO PRESSURE  ='',F17.5,'' KCAL/MOL''    )') &
           hpress
-          sum = -(4184.d0*10.d0**30)*pressure/fpc_10
+          sum = (4184.d0*10.d0**30)*pressure/fpc_10
           if (abs(sum) > 1.d9) then
             write (iw, '(10X,''PRESSURE                ='',F17.5,'' Gp''    )') sum*1.d-9
           else
@@ -726,6 +734,13 @@
           end if
           sum = dumy(1) ! Dummy operation - to use dumy
         end if
+      else ! make sure kchrge is defined, even with no valence electrons
+        sum = 0.D0
+        do i = 1, numat
+          l = nat(i)
+          sum = sum + tore(l)
+        end do
+        kchrge = nint(sum)
       end if
       if (norbs > 0) then
         if (index(keywrd,' FOCK') /= 0) then
@@ -734,7 +749,7 @@
         end if
         if (mers(1) /= 0 .and. .not. mozyme .and. index(keywrd, " BZ") /= 0) then
           bcc = index(keywrd,' BCC') /= 0
-          open(unit=ibrz, file=brillouin_fn, status='UNKNOWN')
+          open(unit=ibrz, file=brillouin_fn)
           write (ibrz,*) norbs, (max(mers(i),1), i = 1,3), bcc
           write (ibrz,*) (f(i),i=1,(norbs*(norbs + 1))/2)
           write (ibrz,*) tvec, id, numat, ((coord(j,i),j=1,3),i=1,numat)
@@ -870,7 +885,7 @@
           end if
           pa = p - pb
         end if
-        if (gui .or. index(keywrd,' BONDS') + index(keywrd,' ALLBO') /= 0) then
+        if (index(keywrd,' BONDS') + index(keywrd,' ALLBO') /= 0) then
           if ( .not. mozyme) then
             if (nbeta == 0) then
               write (iw, '(/10X,''BONDING CONTRIBUTION OF EACH M.O.'',/)')
@@ -908,9 +923,11 @@
         sum = meci()
         if (moperr) return
       end if
-      if (index(keywrd,' MULLIK') + index(keywrd,' GRAPH') /= 0 .and. .not. gui) then
+      if (index(keywrd,' MULLIK') + index(keywrd,' GRAPH') /= 0) then
         if (index(keywrd,' MULLIK') /= 0) write (iw, &
           '(/10X,'' MULLIKEN POPULATION ANALYSIS'')')
+        mpack = (norbs*(norbs + 1))/2
+        allocate(popmat(mpack))
         if (mozyme) then
           if (allocated(c)) deallocate(c)
           allocate (c(norbs, norbs), stat=i)
@@ -928,30 +945,26 @@
 !
 !              Convert "h" from MOZYME form to lower-half-triangle
 !
-          mpack = (norbs*(norbs + 1))/2
-          allocate(pb(mpack))
-          call convert_mat_packed_to_triangle(h, pb)
+          call convert_mat_packed_to_triangle(h, popmat)
           deallocate(h)        !   "h" must be deallocated because it might be smaller than mpack
           allocate(h(mpack))   !   Re-allocate "h"
-          h(:mpack) = pb(:mpack)
+          h(:mpack) = popmat(:mpack)
         end if
-        call mullik ()
+        call mullik (popmat)
         if (index(keywrd,' GRAPH') /= 0) &
           write (iw,'(/10X,'' DATA FOR GRAPH WRITTEN TO DISK'')')
       end if
-!
-!  NOTE: ON EXIT FROM MULLIK, PB HOLDS THE MULLIKEN ANALYSIS.
-!
       if (index(keywrd," SYB") /= 0) then
-        call mpcsyb(q, kchrge, eionis, dip)
+        call mpcsyb(q, kchrge, eionis, dip, popmat)
       else
-        if (index(keywrd,' MULLIK') /= 0)  call mpcpop(-1)
+        if (index(keywrd,' MULLIK') /= 0)  call mpcpop(-1, popmat)
       end if
+      if (allocated(popmat)) deallocate(popmat)
       if (icalcn /= numcal) then
         inquire(unit=iarc, opened=opend)
         if ( .not. opend) then
           if (namfil == '**NULL**') namfil = archive_fn
-          open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis', iostat = i)
+          open(unit=iarc, file=archive_fn, iostat = i)
           if (i /= 0) then
             write(iw,*) "Could not open archive file, run continuing."
             return
@@ -965,13 +978,13 @@
             if (line(i:i) == "/" .or. line(i:i) == backslash) exit
           end do
           line = trim(line)//"pdb"
-          open(unit=31, file=trim(line), status='UNKNOWN', position='asis')
+          open(unit=31, file=trim(line))
           l_normal_html = .true.
           call l_control("Write_Escf", len("Write_Escf"), 1)
           call pdbout(31)
           close (31)
         end if
-        if (numcal == 2) then
+        if (numcal == 2+numcal0) then
           if (index(keywrd, "OLDGEO") /= 0) then
 !
 ! Write a warning that OLDGEO has been used, so user is aware that multiple ARC files are present
@@ -1072,7 +1085,7 @@
         if (abs(solv_energy) > 1.d-1) &
           write (iwrite, '(    10X,''SOLVATION ENERGY        ='',F17.5,'' EV''   )') solv_energy
       end if
-      if (abs(ediel) > 1.d-5) then
+      if (iseps) then
         write (iwrite, '(    10X,''DIELECTRIC ENERGY       ='',F17.5,'' EV''   )') ediel
       end if
       if (Abs (pressure) > 1.d-4) then
@@ -1081,7 +1094,7 @@
           sum =  volume (tvec, 3)
           write (iwrite, '(    10X,''ENERGY DUE TO PRESSURE  ='',F17.5,'' KCAL/MOL''    )') &
           hpress
-          sum = -(4184.d0*10.d0**30)*pressure/fpc_10
+          sum = (4184.d0*10.d0**30)*pressure/fpc_10
           if (abs(sum) > 1.d9) then
             write (iwrite, '(10X,''PRESSURE                ='',F17.5,'' Gp''    )') sum*1.d-9
           else
@@ -1349,7 +1362,7 @@
   double precision :: sum
   integer :: i, j, k, i1, i2, ips, ix
   double precision :: fcon, dqam1dft, dd, enew
-    open (unit=iwc, file=cosmo_fn, status='unknown')
+    open (unit=iwc, file=cosmo_fn)
     if (index(keywrd,'COSCCH') > 0) then
       fcon=a0*ev
 10    read(ir,'(a)',err=30,end=30) line

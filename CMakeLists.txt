@@ -1,18 +1,17 @@
 # Molecular Orbital PACkage (MOPAC)
-# Copyright (C) 2021, Virginia Polytechnic Institute and State University
+# Copyright 2021 Virginia Polytechnic Institute and State University
 #
-# MOPAC is free software: you can redistribute it and/or modify it under
-# the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# MOPAC is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
+#    http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Using Cmake version 3.14 for NumPy support
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
@@ -29,36 +28,6 @@ endif()
 # Read version number
 file(READ "CITATION.cff" CITATION)
 string(REGEX MATCH "[^-]version: ([0-9\.]*)" _ ${CITATION})
-
-# Specify project name & programming languages
-project(openmopac VERSION ${CMAKE_MATCH_1} LANGUAGES Fortran)
-
-# Enable C language support for MKL?  (C is only needed for auto-detection of MKL by find_package)
-option(ENABLE_MKL "Turn on C language support for MKL" ON)
-if(ENABLE_MKL)
-  enable_language(C)
-endif()
-
-# Follow GNU conventions for installing directories (languages need to be enabled at this stage)
-include(GNUInstallDirs)
-
-# Failsafe definition of install directories (not guaranteed behavior in some older CMake versions)
-if(NOT DEFINED CMAKE_INSTALL_BINDIR)
-  set(CMAKE_INSTALL_BINDIR "bin")
-endif()
-if(NOT DEFINED CMAKE_INSTALL_LIBDIR)
-  set(CMAKE_INSTALL_LIBDIR "lib")
-endif()
-
-# Static or dynamic build
-option(STATIC_BUILD "Build a static executable" OFF)
-if (STATIC_BUILD)
-  message(STATUS "Static executables")
-  message(WARNING "CMake cannot verify the ability to link static executables in the pre-build phase. "
-    "Please verify that you are able to link static executables with a \"-static\" linker flag.")
-else()
-  message(STATUS "Shared library and dynamic executables")
-endif()
 
 # Code coverage option
 option(ENABLE_COVERAGE "Code coverage flag" OFF)
@@ -78,6 +47,39 @@ else()
 endif()
 
 message(STATUS "Build type is ${CMAKE_BUILD_TYPE}")
+
+# Specify project name & programming languages
+project(openmopac VERSION ${CMAKE_MATCH_1} LANGUAGES Fortran)
+
+# Enable C language support for MKL?  (C is only needed for auto-detection of MKL by find_package)
+option(ENABLE_MKL "Turn on C language support for MKL" ON)
+option(USE_C_MALLOC "Turn on C malloc/free for API memory management" OFF)
+option(FORCE_EXPORT_SYMBOLS "Turn on CMake system to export all symbols in MOPAC shared library" OFF)
+if(ENABLE_MKL OR USE_C_MALLOC OR FORCE_EXPORT_SYMBOLS)
+  enable_language(C)
+endif()
+
+# Follow GNU conventions for installing directories (languages need to be enabled at this stage)
+include(GNUInstallDirs)
+
+# Failsafe definition of install directories (not guaranteed behavior in some older CMake versions)
+if(NOT DEFINED CMAKE_INSTALL_BINDIR)
+  set(CMAKE_INSTALL_BINDIR "bin")
+endif()
+if(NOT DEFINED CMAKE_INSTALL_LIBDIR)
+  set(CMAKE_INSTALL_LIBDIR "lib")
+endif()
+
+# Static or dynamic build
+option(STATIC_BUILD "Build a static executable" OFF)
+if (STATIC_BUILD)
+  message(STATUS "Static executables")
+  message(WARNING "CMake cannot verify the ability to link static executables in the pre-build phase. "
+    "Please verify that you are able to link static executables with a \"-static\" linker flag. "
+    "OpenMP does not support static builds by default, so try THREADS_KEYWORD=OFF if the static build fails to turn off OpenMP.")
+else()
+  message(STATUS "Shared library and dynamic executables")
+endif()
 
 # location for CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -100,6 +102,9 @@ if (STATIC_BUILD)
   set(BLA_STATIC ON)
 else()
   add_library(mopac-core SHARED)
+  if(FORCE_EXPORT_SYMBOLS)
+    set_target_properties(mopac-core PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS true)
+  endif()
 endif()
 set_target_properties(mopac-core PROPERTIES OUTPUT_NAME "mopac")
 add_executable(mopac)
@@ -116,30 +121,33 @@ endif()
 # Add CITATION.cff to source files so that version updates are not ignored
 target_sources(mopac-core PRIVATE CITATION.cff)
 
-# WinMOPAC build on Windows w/ the Intel Fortran compiler
-option(BUILD_WINMOPAC "Build MOPAC & BZ with QuickWin GUI (ifort required)" OFF)
-if(BUILD_WINMOPAC)
+# BZ build on Windows w/ the Intel Fortran compiler
+option(BUILD_BZ "Build BZ with QuickWin GUI (ifort required)" OFF)
+if(BUILD_BZ)
   if(NOT (CMAKE_Fortran_COMPILER_ID STREQUAL "Intel"))
-    message(FATAL_ERROR "WinMOPAC compilation requires the Intel Fortran compiler (ifort)")
+    message(FATAL_ERROR "BZ compilation requires the Intel Fortran compiler (ifort)")
   endif()
   if(NOT WIN32)
-    message(FATAL_ERROR "WinMOPAC is only available on Windows")
+    message(FATAL_ERROR "BZ is only available on Windows")
   endif()
-  add_executable(mopac-win)
-  target_link_libraries(mopac-win mopac-core)
-  target_compile_options(mopac-win PRIVATE /libs:qwin)
-  target_link_options(mopac-win PRIVATE /subsystem:windows)
   add_executable(mopac-bz)
   target_compile_options(mopac-bz PRIVATE /libs:qwin)
   target_link_options(mopac-bz PRIVATE /subsystem:windows)
   if (STATIC_BUILD)
-    target_link_options(mopac-win PUBLIC "-static")
     target_link_options(mopac-bz PUBLIC "-static")
   endif()
 endif()
 
+# Use malloc in API w/ Intel Fortran compiler because it can't deallocate Fortran-allocated memory passed through a C interface
+if(USE_C_MALLOC)
+  target_compile_definitions(mopac-core PRIVATE MOPAC_API_CC)
+  target_link_libraries(mopac-core PUBLIC ${CMAKE_C_STANDARD_LIBRARIES})
+elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "Intel")
+  target_compile_definitions(mopac-core PRIVATE MOPAC_API_IFORT)
+endif()
+
 # MOPAC shared library ABI compatibility version
-set_target_properties(mopac-core PROPERTIES SOVERSION 1)
+set_target_properties(mopac-core PROPERTIES SOVERSION 2)
 
 # Adjust legacy PGI compiler behavior: disable C-style backslash characters & warn about CRLF handling
 if(CMAKE_Fortran_COMPILER_ID MATCHES "PGI|Flang")
@@ -155,6 +163,7 @@ if(APPLE)
   target_compile_definitions(mopac-core PRIVATE MOPAC_OS="MacOS")
 elseif(WIN32)
   target_compile_definitions(mopac-core PRIVATE MOPAC_OS="Windows")
+  target_compile_definitions(mopac-core PRIVATE WIN32)
 elseif(UNIX)
   target_compile_definitions(mopac-core PRIVATE MOPAC_OS="Linux")
 endif()
@@ -168,18 +177,20 @@ endif()
 if(F2003_INTRINSICS)
   target_compile_definitions(mopac-core PRIVATE MOPAC_F2003)
   target_compile_definitions(mopac-makpol PRIVATE MOPAC_F2003)
-  if(BUILD_WINMOPAC)
-    target_compile_definitions(mopac-win PRIVATE MOPAC_F2003)
+  if(BUILD_BZ)
     target_compile_definitions(mopac-bz PRIVATE MOPAC_F2003)
   endif()
 endif()
 
 # Pass version & commit information to MOPAC's Fortran source
 target_compile_definitions(mopac-core PRIVATE MOPAC_VERSION_FULL="${PROJECT_VERSION}")
-execute_process(COMMAND git rev-parse HEAD OUTPUT_VARIABLE GIT_HASH)
+option(GIT_HASH "Show git hash in --version info (git repo only)" ON)
 if(GIT_HASH)
-  string(STRIP ${GIT_HASH} GIT_HASH)
-  target_compile_definitions(mopac-core PRIVATE MOPAC_GIT_HASH="${GIT_HASH}")
+  execute_process(COMMAND git rev-parse HEAD OUTPUT_VARIABLE GIT_HASH_VAL)
+  if(GIT_HASH_VAL)
+    string(STRIP ${GIT_HASH_VAL} GIT_HASH_VAL)
+    target_compile_definitions(mopac-core PRIVATE MOPAC_GIT_HASH="${GIT_HASH_VAL}")
+  endif()
 endif()
 
 # Try to use CMake's system of finding BLAS & LAPACK libraries
@@ -210,6 +221,56 @@ if(THREADS_KEYWORD)
   endif()
 endif()
 
+# OpenACC GPU code for MOZYME (Fock build, density matrix, diagg1, helecz: src/MOZYME/acc_*.F90).
+# Needs nvfortran (NVIDIA HPC SDK). GPU_OPENACC_ARCH lists the compute capabilities to build device
+# code for (two or three digits: 86 = sm_86, 120 = sm_120). At run time a device is used only if the
+# build has code it can run (same major version, minor version at most the device's); otherwise, or
+# with the NOGPU keyword, MOZYME runs on the CPU. The binary then needs the NVIDIA driver at run time.
+option(GPU_OPENACC "Build the OpenACC GPU code for MOZYME (requires nvfortran)" OFF)
+set(GPU_OPENACC_ARCH "86;120" CACHE STRING "Compute capabilities for the OpenACC device code, e.g. 80;86;89;90;120")
+if(GPU_OPENACC)
+  if(NOT CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
+    message(FATAL_ERROR "GPU_OPENACC requires the NVIDIA HPC SDK Fortran compiler (nvfortran); found ${CMAKE_Fortran_COMPILER_ID}")
+  endif()
+  set(_acc_cc "")
+  foreach(_acc_a ${GPU_OPENACC_ARCH})
+    list(APPEND _acc_cc "cc${_acc_a}")
+  endforeach()
+  list(JOIN _acc_cc "," _acc_gpu)
+  list(JOIN GPU_OPENACC_ARCH "," _acc_list)
+  message(STATUS "OpenACC GPU code for MOZYME: -acc=gpu -gpu=${_acc_gpu}")
+  # -Mbackslash: treat backslashes in strings literally, as the other compilers do
+  target_compile_options(mopac-core PUBLIC -Mbackslash -acc=gpu -gpu=${_acc_gpu})
+  target_link_options(mopac-core PUBLIC -acc=gpu -gpu=${_acc_gpu})
+  target_compile_definitions(mopac-core PRIVATE "MOPAC_ACC_CCS=${_acc_list}")
+  if(TARGET mopac-makpol)
+    target_compile_options(mopac-makpol PUBLIC -Mbackslash)
+  endif()
+endif()
+
+# MAGMA GPU eigensolver (src/matrix/mopac_magma.F90). Static by design: MAGMA_ROOT holds a static,
+# position-independent libmagma.a; CUDA_STATIC_LIB is a CUDA toolkit lib64 directory with the static
+# cuBLAS/cuBLASLt/cudart/culibos archives, so the result needs only the NVIDIA driver at run time.
+# This block precedes MOPAC_LINK so MAGMA's LAPACK references resolve against the BLAS/LAPACK given there.
+set(MAGMA_ROOT "" CACHE PATH "Install prefix of a static, PIC MAGMA build (enables -DMOPAC_MAGMA)")
+set(CUDA_STATIC_LIB "" CACHE PATH "CUDA toolkit lib64 directory holding the static CUDA archives")
+if(MAGMA_ROOT)
+  if(NOT CUDA_STATIC_LIB)
+    message(FATAL_ERROR "MAGMA_ROOT requires CUDA_STATIC_LIB (CUDA toolkit lib64 with the *_static.a archives)")
+  endif()
+  message(STATUS "MAGMA GPU eigensolver: ${MAGMA_ROOT} with static CUDA from ${CUDA_STATIC_LIB}")
+  target_compile_definitions(mopac-core PRIVATE MOPAC_MAGMA)
+  target_link_libraries(mopac-core PUBLIC
+    ${MAGMA_ROOT}/lib/libmagma.a
+    ${CUDA_STATIC_LIB}/libcusparse_static.a
+    ${CUDA_STATIC_LIB}/libcublas_static.a
+    ${CUDA_STATIC_LIB}/libcublasLt_static.a
+    ${CUDA_STATIC_LIB}/libcudart_static.a
+    ${CUDA_STATIC_LIB}/libculibos.a
+    stdc++ dl rt pthread)
+  target_link_options(mopac-core PRIVATE "LINKER:--no-undefined")
+endif()
+
 # Additional link line
 set(MOPAC_LINK "" CACHE STRING "Additional link line for MOPAC executable.")
 set(MOPAC_LINK_PATH "" CACHE STRING "Path of external dependencies to bundle.")
@@ -217,6 +278,20 @@ separate_arguments(MOPAC_LINK)
 separate_arguments(MOPAC_LINK_PATH)
 target_link_libraries(mopac-core PUBLIC ${MOPAC_LINK})
 target_link_directories(mopac-core PUBLIC ${MOPAC_LINK_PATH})
+
+# MDI functionality (in development)
+option(MDI "MDI build flag" OFF)
+if(MDI)
+  add_definitions(-DBUILD_MDI)
+  find_package(mdi)
+  if(mdi_FOUND)
+    message(STATUS "Found MDI: ${mdi_LIBRARY}")
+    target_link_libraries(mopac-core PUBLIC ${mdi_LIBRARY})
+  else()
+    message(STATUS "MDI not found, a local version will be downloaded & built")
+    include(MDI)
+  endif()
+endif()
 
 # Add list of source files from src directory
 add_subdirectory(src)
@@ -241,12 +316,6 @@ if(ENABLE_COVERAGE)
   configure_file("cmake/CTestCustom.cmake" "${CMAKE_BINARY_DIR}/CTestCustom.cmake")
 endif()
 
-# MDI functionality (in development)
-option(MDI "MDI build flag" OFF)
-if(MDI)
-  include(MDI)
-endif()
-
 # GPU functionality (not functional at the moment)
 option(GPU "GPU build flag" OFF)
 if(GPU)
@@ -260,11 +329,14 @@ if(TESTS)
   if(NOT Python3_FOUND)
     if(Python3_Interpreter_FOUND AND (NOT Python3_NumPy_FOUND))
       message(NOTICE "Python3 found without NumPy at path: ${Python3_EXECUTABLE}\n"
-              "(HINT: install NumPy for this Python3 instance with pip or give higher priority to an instance with NumPy installed)")
+              "(HINT: install NumPy for this Python3 instance with pip or conda, or give higher priority to an instance with NumPy installed by setting Python3_EXECUTABLE)")
     endif()
     message(FATAL_ERROR "Python3 and Numpy are required for MOPAC testing (testing can be disabled with -DTESTS=OFF)")
   endif()
   enable_testing()
+  add_executable(mopac-api-test)
+  target_link_libraries(mopac-api-test mopac-core)
+  add_subdirectory(include)
   add_subdirectory(tests)
 endif()
 
@@ -289,7 +361,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "Intel")
     if(INTEL_OMP_DLL STREQUAL "INTEL_OMP_DLL-NOTFOUND")
       message("WARNING: Cannot locate Intel's OpenMP dll for packaging")
     endif()
-    install(PROGRAMS ${INTEL_OMP_DLL} DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT qtifw EXCLUDE_FROM_ALL)
+    install(PROGRAMS ${INTEL_OMP_DLL} DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT redist EXCLUDE_FROM_ALL)
   else()
     find_library(INTEL_OMP_LIB iomp5 HINT CMAKE_Fortran_COMPILER PATH_SUFFIXES ../../compiler/lib ../../compiler/lib/intel64_lin)
     if(INTEL_OMP_LIB STREQUAL "INTEL_OMP_LIB-NOTFOUND")
@@ -315,18 +387,21 @@ else()
 endif()
 install(FILES "${CMAKE_SOURCE_DIR}/.github/mopac.ico" DESTINATION "." COMPONENT qtifw EXCLUDE_FROM_ALL)
 install(FILES "${CMAKE_SOURCE_DIR}/CITATION.cff"
-              "${CMAKE_SOURCE_DIR}/COPYING"
-              "${CMAKE_SOURCE_DIR}/COPYING.lesser" DESTINATION "." COMPONENT redist EXCLUDE_FROM_ALL)
+              "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION "." COMPONENT redist EXCLUDE_FROM_ALL)
+install(FILES "${CMAKE_SOURCE_DIR}/include/mopac.h" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT main)
+install(FILES "${CMAKE_SOURCE_DIR}/include/mopac_wrapper_internal.F90" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT redist EXCLUDE_FROM_ALL)
+install(FILES "${CMAKE_SOURCE_DIR}/include/mopac_wrapper.F90" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT redist EXCLUDE_FROM_ALL)
+install(FILES "${CMAKE_SOURCE_DIR}/include/LICENSE" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT redist EXCLUDE_FROM_ALL)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/examples" DESTINATION "." COMPONENT redist EXCLUDE_FROM_ALL)
 
 # Install the executables and library
 install(TARGETS mopac RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT main)
-install(TARGETS mopac-param RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT extra)
-install(TARGETS mopac-makpol RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT extra)
+install(TARGETS mopac-param RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT main)
+install(TARGETS mopac-makpol RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT main)
 if(WIN32)
   install(TARGETS mopac-core RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT main)
-  if(BUILD_WINMOPAC)
-#    install(TARGETS mopac-win RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT extra)
-    install(TARGETS mopac-bz RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT extra)
+  if(BUILD_BZ)
+    install(TARGETS mopac-bz RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT main)
   endif()
 else()
   install(TARGETS mopac-core LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT main)
@@ -336,10 +411,8 @@ endif()
 include(CPack)
 include(CPackIFW)
 cpack_ifw_configure_component(main DISPLAY_NAME "main program" SORTING_PRIORITY 2 FORCED_INSTALLATION
-  LICENSES "primary license (LGPL3)" "${CMAKE_SOURCE_DIR}/COPYING.lesser"
-  "secondary license terms (GPL3)" "${CMAKE_SOURCE_DIR}/COPYING"
+  LICENSES "license (Apache-2.0)" "${CMAKE_SOURCE_DIR}/LICENSE"
   SCRIPT "${CMAKE_SOURCE_DIR}/.github/qtifw_component.qs"
   USER_INTERFACES "${CMAKE_SOURCE_DIR}/.github/pathcheckboxform.ui" "${CMAKE_SOURCE_DIR}/.github/filecheckboxform.ui" "${CMAKE_SOURCE_DIR}/.github/iconcheckboxform.ui")
-cpack_ifw_configure_component(extra DISPLAY_NAME "extra utilities" SORTING_PRIORITY 1 DEFAULT FALSE)
 cpack_ifw_configure_component(qtifw VIRTUAL FORCED_INSTALLATION)
 cpack_ifw_configure_component(redist VIRTUAL FORCED_INSTALLATION)

@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine deriv(geo, gradnt)
 !-----------------------------------------------
@@ -48,8 +47,8 @@
       double precision :: coord(3*natoms), gold(3*natoms), xparam(3*natoms)
 
 
-      double precision :: grlim, sum, gnorm, step, press, summ, press1, &
-      press2, press3
+      double precision :: grlim, sum, gnorm, step, press
+      double precision, dimension(3,3) :: tderiv
       double precision, external :: dot, volume
       logical :: scf1, halfe, slow, aifrst, debug, precis, intn, geochk, ci, &
         aic, noanci, field, saddle, DH_correction, l_redo_bonds
@@ -76,7 +75,7 @@
         saddle = index(keywrd, " SADDLE") /= 0
         debug = index(keywrd,' DERIV') /= 0
         field = index(keywrd,' FIELD') /= 0
-        precis = index(keywrd,' PREC') /= 0
+        precis = index(keywrd,' PRECISE') /= 0
         DH_correction = (index(keywrd,' PM6-D') + index(keywrd,' PM6-H') /= 0 .or. &
           method_PM7 .or. method_pm6_org .or. method_pm8 )
         intn = index(keywrd,'  XYZ') == 0
@@ -104,7 +103,7 @@
         scf1 = index(keywrd,' 1SCF') /= 0
         aic = index(keywrd,'AIDER') /= 0
         if (aic .and. aifrst) then
-          open(unit=ir, file=job_fn, status='OLD', blank='ZERO',position='asis')
+          open(unit=ir, file=job_fn, status='OLD', blank='ZERO')
           rewind ir
 !
 !  ISOK IS SET FALSE: ONLY ONE SYSTEM ALLOWED
@@ -238,6 +237,7 @@
           call geout(iw)
         end if
       end if
+      call C_triple_bond_C_deriv(dxyz)
       if (DH_correction) call post_scf_corrections(sum, .true.)
 !
 !   THE CARTESIAN DERIVATIVES ARE IN DXYZ
@@ -254,14 +254,33 @@
         !  1N = J/M = 10**(-3)/4.184 kcal/M = 4.184*10**(-3)*10**(-10) kcal/Angstrom
           press = pressure / Sqrt (dot(tvec(1, 1), tvec(1, 1), 3))
           do j = 1, 3
-            dxyz(j + i) = dxyz(j + i) + tvec(j, 1) * press
-            dxyz(j + i + 3) = dxyz(j + i + 3) - tvec(j, 1) * press
+            dxyz(j + i) = dxyz(j + i) - tvec(j, 1) * press
+            dxyz(j + i + 3) = dxyz(j + i + 3) + tvec(j, 1) * press
           end do
         else if (id == 3) then
-          summ = volume (tvec, 3)
-          press1 = summ / dot (tvec(1, 1), tvec(1, 1), 3) * pressure
-          press2 = summ / dot (tvec(1, 2), tvec(1, 2), 3) * pressure
-          press3 = summ / dot (tvec(1, 3), tvec(1, 3), 3) * pressure
+  ! Transition vector derivatives of pressure times volume
+  !
+  ! Derivatives are calculated in a redundant coordinate system where the
+  ! atomic coordinates in the central cell plus translation vectors are
+  ! replaced by atomic coordinates in the central cell plus atomic coordinates
+  ! in all coupled non-central cells. The formula for volume that is being
+  ! differentiated uses the coordinate difference between a central atom and
+  ! its neighbors as proxies for the translation vectors in the volume formula.
+  ! The choice of atom in this formula and the resulting derivatives are completely
+  ! arbitrary and do not change the derivatives in the original coordinate system.
+          press = ((tvec(2, 1)*tvec(3, 2)-tvec(3, 1)*tvec(2, 2))*tvec(1, 3) + &
+                  (tvec(3, 1)*tvec(1, 2)-tvec(1, 1)*tvec(3, 2))*tvec(2, 3) + &
+                  (tvec(1, 1)*tvec(2, 2)-tvec(2, 1)*tvec(1, 2))*tvec(3, 3))
+          tderiv(1, 1) = tvec(2, 2)*tvec(3, 3) - tvec(3, 2)*tvec(2, 3)
+          tderiv(2, 1) = tvec(3, 2)*tvec(1, 3) - tvec(1, 2)*tvec(3, 3)
+          tderiv(3, 1) = tvec(1, 2)*tvec(2, 3) - tvec(2, 2)*tvec(1, 3)
+          tderiv(1, 2) = tvec(3, 1)*tvec(2, 3) - tvec(2, 1)*tvec(3, 3)
+          tderiv(2, 2) = tvec(1, 1)*tvec(3, 3) - tvec(3, 1)*tvec(1, 3)
+          tderiv(3, 2) = tvec(2, 1)*tvec(1, 3) - tvec(1, 1)*tvec(2, 3)
+          tderiv(1, 3) = tvec(2, 1)*tvec(3, 2) - tvec(3, 1)*tvec(2, 2)
+          tderiv(2, 3) = tvec(3, 1)*tvec(1, 2) - tvec(1, 1)*tvec(3, 2)
+          tderiv(3, 3) = tvec(1, 1)*tvec(2, 2) - tvec(2, 1)*tvec(1, 2)
+          tderiv = tderiv*pressure*sign(1.d0, press)
   !
   ! Add in gradient pressure term
   !
@@ -269,30 +288,30 @@
   !
           i = 3*(l1u * (2*l2u+1) * (2*l3u+1) + l2u * (2*l3u+1) + l3u - 1)
           do j = 1, 3
-            dxyz(j + i) = dxyz(j + i) + tvec(j, 1) * press1
-            dxyz(j + i) = dxyz(j + i) + tvec(j, 2) * press2
-            dxyz(j + i) = dxyz(j + i) + tvec(j, 3) * press3
+            dxyz(j + i) = dxyz(j + i) - tderiv(j, 1)
+            dxyz(j + i) = dxyz(j + i) - tderiv(j, 2)
+            dxyz(j + i) = dxyz(j + i) - tderiv(j, 3)
           end do
   !
   !  Cell in 0,0,1 position
   !
           i = 3*(l1u * (2*l2u+1) * (2*l3u+1) + l2u * (2*l3u+1) + l3u)
           do j = 1, 3
-            dxyz(j + i) = dxyz(j + i) - tvec(j, 3) * press3
+            dxyz(j + i) = dxyz(j + i) + tderiv(j, 3)
           end do
   !
   !  Cell in 0,1,0 position
   !
           i = 3*(l1u * (2*l2u+1) * (2*l3u+1) + (l2u+1) * (2*l3u+1) + l3u - 1)
           do j = 1, 3
-            dxyz(j + i) = dxyz(j + i) - tvec(j, 2) * press2
+            dxyz(j + i) = dxyz(j + i) + tderiv(j, 2)
           end do
   !
   !  Cell in 1,0,0 position
   !
           i = 3*((l1u+1) * (2*l2u+1) * (2*l3u+1) + l2u * (2*l3u+1) + l3u - 1)
           do j = 1, 3
-            dxyz(j + i) = dxyz(j + i) - tvec(j, 1) * press1
+            dxyz(j + i) = dxyz(j + i) + tderiv(j, 1)
           end do
         end if
       end if

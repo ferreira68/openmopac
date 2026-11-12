@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, idiagg,  avir, aocc, aov)
    !**********************************************************************
@@ -42,6 +41,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
        tiny, sumt, ijc, ovmax, ncf, nce, nncf, nnce, ncocc, ncvir, &
      & iorbs, icocc, icvir, cocc, cvir
     use common_arrays_C, only : eigs, nfirst, nlast, p
+    use acc_mozyme_C, only : acc_path_note
     implicit none
     integer, intent (in) :: idiagg, nocc, nvir, fmo_dim
     integer, intent (inout) :: nij
@@ -63,6 +63,13 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     double precision, save :: fref, oldlim, safety
     double precision :: cutoff, sum, sum1
     integer, external :: ijbo
+    integer, external :: acc_diagg_mode
+    integer :: gmode, ijcg
+    logical :: full, docc, gok
+    double precision :: sumtg, tinyg, tg
+    integer(8) :: gc0, gc1, grate
+    integer, allocatable :: ifmog(:,:), nfmog(:)
+    double precision, allocatable :: fmog(:), eigvg(:), eigsg(:)
     if (numcal /= icalcn) then
       icalcn = numcal
       fref = 10.0d0
@@ -118,6 +125,36 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     sumt = 0.d0
     ijc = 0
     tiny = 0.d0
+    !
+    !  GPU (OpenACC) version of the loops below, MOPAC_ACC_DIAGG set (acc_diagg_mozyme.F90).
+    !  "test": the GPU results go into copies and are compared with the CPU results at the end.
+    !
+    gmode = 0
+    gok = .false.
+    if (lijbo) then
+      gmode = acc_diagg_mode()
+    else if (acc_diagg_mode() /= 0) then
+      call acc_path_note('DIAGG1 (no atom-pair index table)')
+    end if
+    full = (idiagg <= 5 .or. Mod (idiagg, 2) == 0)
+    docc = .not. (idiagg > 2 .and. Mod (idiagg, 4) /= 0)
+    if (gmode == 1) then
+      call acc_diagg1_core (fao, nocc, nvir, eigv, eigs, nfmo, ifmo, ifmo, fmo, fmo_dim, nij, &
+           & cutoff, flim, oldlim, full, docc, ijc, sumt, tiny, gok)
+      if (gok) go to 900
+      sumt = 0.d0
+      ijc = 0
+      tiny = 0.d0
+    else if (gmode == 2) then
+      allocate (ifmog(2, fmo_dim), nfmog(nvir), fmog(fmo_dim), eigvg(nvir), eigsg(nocc))
+      nfmog(1:nvir) = nfmo(1:nvir)
+      call system_clock (gc0, grate)
+      call acc_diagg1_core (fao, nocc, nvir, eigvg, eigsg, nfmog, ifmog, ifmo, fmog, fmo_dim, nij, &
+           & cutoff, flim, oldlim, full, docc, ijcg, sumtg, tinyg, gok)
+      call system_clock (gc1)
+      tg = dble(gc1 - gc0)/dble(grate)
+      if (.not. full .and. gok) ifmog(:, 1:ijcg) = ifmo(:, 1:ijcg)
+    end if
     !
     !
     do i = 1, nvir
@@ -456,6 +493,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       end if
     end do
     !
+900 continue
     if (ijc == nij) then
       !
       !   THERE WAS NOT ENOUGH STORAGE TO HOLD ALL THE INTEGRALS.
@@ -482,6 +520,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       !  EVALUATE THE OCCUPIED ENERGY LEVELS
       !
         !
+      if (gmode /= 1 .or. .not. gok) then
       do i = 1, nocc
         !
           loopi = ncocc(i)
@@ -639,6 +678,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
           eigs(i) = sum
           !
       end do
+      end if
             oldlim = tiny * safety * 1.d-3
       fref = tiny ** 4
       if (times) then
@@ -646,5 +686,10 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       end if
     end if
 
+    if (gmode == 2) then
+      if (gok) call acc_diagg1_compare (nvir, nocc, eigv, eigvg, eigs, eigsg, docc, ijc, ijcg, ifmo, ifmog, fmo, fmog, &
+           & nfmo, nfmog, sumt, sumtg, tiny, tinyg, tg)
+      deallocate (ifmog, nfmog, fmog, eigvg, eigsg)
+    end if
     ovmax = tiny
 end subroutine diagg1

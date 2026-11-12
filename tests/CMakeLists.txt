@@ -1,18 +1,17 @@
 # Molecular Orbital PACkage (MOPAC)
-# Copyright (C) 2021, Virginia Polytechnic Institute and State University
+# Copyright 2021 Virginia Polytechnic Institute and State University
 #
-# MOPAC is free software: you can redistribute it and/or modify it under
-# the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# MOPAC is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
+#    http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 #Basic input/output comparison tests
 
@@ -30,6 +29,8 @@ macro(add_mopac_test _name _files)
   add_test(NAME "${_name}" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/run_test.py ${CMAKE_CURRENT_SOURCE_DIR}
            ${CMAKE_BINARY_DIR}/mopac${CMAKE_EXECUTABLE_SUFFIX} ${HOF_ERROR} ${_files})
 endmacro()
+
+target_sources(mopac-api-test PRIVATE mopac_api_test.F90)
 
 add_subdirectory(INDO-dev)
 add_subdirectory(keywords)
@@ -69,3 +70,6 @@ set(HOF_ERROR 1.0) # Raise threshold, these tests are only looking for crashes
 add_mopac_test(erratic-1 "erratic1.mop")
 add_mopac_test(erratic-2 "erratic2.mop")
 add_mopac_test(erratic-3 "erratic3.mop")
+
+add_test(NAME "mopac-api-test" COMMAND mopac-api-test)
+

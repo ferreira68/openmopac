@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 logical function connected(atom_i, atom_j, criterion)
 !
@@ -353,12 +352,10 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
     if (energy > -0.5d0) return
     sum1 = distance(D,H)
     P_Hbonds = min(numat, P_Hbonds + 1)
-    if (txtatm(D) == " ") write(txtatm(D),'(a,i5,3x,a)')"Atom No.:", D, elemnt(nat(D))
-    if (txtatm(H) == " ") write(txtatm(H),'(a,i5,3x,a)')"Atom No.:", H, elemnt(nat(H))
-    if (txtatm(A) == " ") write(txtatm(A),'(a,i5,3x,a)')"Atom No.:", A, elemnt(nat(A))
-    if (maxtxt == 0) then
-      write(H_txt(P_Hbonds),'(2x,a,f15.3,6x,a,12x,a,10x, f7.2,a)')trim(txtatm(D)), sum1,  &
-      trim(txtatm(H)), trim(txtatm(A)), energy, " Kcal/mol"
+    if (maxtxt < 2) then    
+      write(H_txt(P_Hbonds),'(2x,a,i5,3x,a,f15.3,6x,a,i5,3x,a,12x,a,i5,3x,a,10x, f7.2,a)') &
+        "Atom No.:", D, elemnt(nat(D)), sum1, "Atom No.:", H, elemnt(nat(H)),   &
+        "Atom No.:", A, elemnt(nat(A)), energy, " Kcal/mol"
     else
       write(H_txt(P_Hbonds),'(a,2x,f6.3,3x,a,3x,a,3x, f7.2,a)')""""//txtatm(D)(:maxtxt)//"""", sum1,  &
       """"//txtatm(H)(:maxtxt)//"""", """"//txtatm(A)(:maxtxt)//"""", energy, " Kcal/mol"

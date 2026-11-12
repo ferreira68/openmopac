@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine pulay_for_gpu(f, p, n, fppf, fock, emat, &
                         & lfock, nfock, msize, start, pl) 
@@ -27,7 +26,7 @@
       integer  :: n,iopc 
       integer , intent(inout) :: lfock 
       integer , intent(inout) :: nfock 
-      integer , intent(in) :: msize 
+      integer(8) , intent(in) :: msize 
       double precision , intent(out) :: pl 
       logical , intent(inout) :: start 
       double precision  :: f(mpack) 
@@ -35,7 +34,9 @@
       double precision  :: fppf(6*mpack)
       double precision , intent(inout) :: fock(*) 
       double precision , intent(inout) :: emat(20,20) 
-      integer :: icalcn, maxlim, linear, mfock, lbase, i, nfock1, j, l, il, ii, idim, kdim
+      integer :: icalcn, maxlim, mfock, i, nfock1, j, l, il
+!     64-bit: offsets into the npulay*mpack history arrays exceed 2**31 above N_AO ~ 20,700
+      integer(8) :: linear, lbase, ii, idim, kdim
       double precision, dimension(1000) :: evec 
       double precision, dimension(20) :: coeffs 
       double precision :: const, d, sum 
@@ -77,9 +78,8 @@
         debug = index(keywrd,'DEBUGPULAY') /= 0 
       end if 
       if (start) then 
-        linear = (n*(n + 1))/2 
-        mfock = msize/linear 
-        mfock = min0(maxlim,mfock) 
+        linear = (int(n,8)*(n + 1))/2 
+        mfock = int(min(int(maxlim,8), msize/linear)) 
         if (debug) write (iw, '('' MAXIMUM SIZE:'',I5)') mfock 
         nfock = 1 
         lfock = 1 
@@ -109,8 +109,8 @@
         iopc = 3
       end if
 
-      call mult_symm_AB(p, f, 1.d0, n, linear, fppf(lbase+1:idim), 0.d0, iopc)
-      call mult_symm_AB(f, p, 1.d0, n, linear, fppf(lbase+1:idim), -1.d0, iopc)
+      call mult_symm_AB(p, f, 1.d0, n, int(linear), fppf(lbase+1:idim), 0.d0, iopc)
+      call mult_symm_AB(f, p, 1.d0, n, int(linear), fppf(lbase+1:idim), -1.d0, iopc)
       
 !      call mamult (p, f, fppf(lbase+1), n, 0.D0) 
 !      call mamult (f, p, fppf(lbase+1), n, -1.D0) 
@@ -123,7 +123,7 @@
         kdim = i*linear        
         emat(nfock1,i) = -1.D0 
         emat(i,nfock1) = -1.D0  
-        emat(lfock,i) = ddot(linear,fppf((i-1)*linear+1:kdim),1,fppf(lbase+1:idim),1)
+        emat(lfock,i) = ddot(int(linear),fppf((i-1)*linear+1:kdim),1,fppf(lbase+1:idim),1)
         
         emat(i,lfock) = emat(lfock,i) 
       end do 
@@ -182,7 +182,7 @@
       do i = 1, linear 
         sum = 0.D0 
         l = 0 
-        ii = (i - 1)*mfock 
+        ii = (int(i,8) - 1)*mfock 
         do j = 1, nfock 
           sum = sum + coeffs(j)*fock(j+ii) 
         end do 

@@ -1,48 +1,90 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine hcore_for_MOZYME ()
   use molkst_C, only: numat, norbs, id, numcal, n2elec, moperr, &
-     & enuclr, l1u, l2u, l3u, keywrd, efield, mpack, cutofp
+     & enuclr, l1u, l2u, l3u, keywrd, efield, mpack, cutofp, line
   use cosmo_C, only : useps,  phinet, qscnet, qdenet
   use linear_cosmo, only : addnucz
   use chanel_C, only: iw
-  use funcon_C, only: a0, ev
+  use funcon_C, only: a0, ev, fpc_9
   use overlaps_C, only : cutof1, cutof2
   use parameters_C, only: tore, dd, natorb
   use common_arrays_C, only: h, coord, nat, w, wj => w, wk, uspd, tvec
   use MOZYME_C, only : semidr, direct, cutofs, parth, &
     iorbs, jopt, mode, numred, refnuc
+!$ use omp_lib, only : omp_get_max_threads
   implicit none
 !
   character (len=248) :: tmpkey
-  logical :: calci, calcij, calcj, fldon
+  logical :: calci, calcij, calcj, fldon, lmolaris_qmmm, exists
   logical, save :: debug
   integer :: i1, i2, ii, im1, io1, ione, ired, j, j1, jj, jo1, jred, k, &
- & krmax, kro, ks, mm, nj, kr, i, ni, itemp, imol=0
+ & krmax, kro, ks, mm, nj, kr, i, ni, itemp, imol=0, q_at, link_at, mol_at
   double precision :: const, enuc, fldcon, fnuc, half, hterme, xf, yf, zf, xj(3)
   double precision, parameter :: eps = 1.d-10
   double precision, dimension (45) :: e1b, e2a
   double precision, dimension (2025) :: wjd, wkd
   double precision, dimension (9, 9) :: di, dibits
+  double precision, allocatable :: vqc(:)
   double precision, external :: reada
   integer, external :: ijbo
+  integer :: nthr
   fldcon = 0.d0
   fnuc = 0.d0
   debug = (Index (keywrd, " HCORE") /= 0)
+  lmolaris_qmmm = (index(keywrd,'QMMM') /= 0)
+  if (lmolaris_qmmm) then
+  !
+  !  Read in the energy in kcal/mol that an electron on each atom would have, arising from
+  !  the partial charges on all atoms.
+  !
+    line="mol.in"
+    call add_path(line)
+    inquire (file=trim(line), exist = exists)
+    if (.not. exists) then
+        call mopend("A file named '"//trim(line)//"' was expected, but was not found.")
+        return
+    end if
+    open(85, file=line, form='formatted')
+    read(85, *, iostat = i)
+    if (i /= 0) then
+        call mopend("A file named '"//trim(line)//"' exists, but is empty.")
+        return
+    end if
+    read(85, *, iostat = i)q_at, link_at
+    if (i /= 0) then
+        call mopend("A file named '"//trim(line)//"' exists, but is corrupt.")
+        return
+    end if
+    mol_at = q_at + link_at
+    if(mol_at /= numat) then
+      write(line,'(a,i5,a,i5,a)') &
+        " The number of atoms in 'mol.in':",mol_at," and in the MOPAC data set:",numat," are different."
+      call mopend(trim(line))
+      write(iw,'(10x,a)')" Correct fault and resubmit."
+      return
+    end if
+    if (allocated(vqc)) deallocate(vqc)
+    allocate(vqc(numat))
+    do i = 1, numat
+      read(85,*)line,line,line,line,vqc(i)
+      if (debug) write(iw,'(a, i4, a, f9.3)')"ATOM No.",i," VQC(I)",vqc(i)
+    end do
+    close(85)
+  end if
   call add_more_interactions()
   if (moperr) return
   if (imol /= numcal) then
@@ -121,6 +163,13 @@ subroutine hcore_for_MOZYME ()
     !
     h(1:mpack) = 0.d0
   end if
+  nthr = 1
+!$ nthr = omp_get_max_threads()
+  if (mode == 0 .and. id == 0 .and. semidr .and. .not. fldon .and. .not. lmolaris_qmmm .and. .not. debug &
+    .and. nthr > 1 .and. numat > 1) then
+    call hcore_rows_omp()           ! the loop below, over OpenMP threads, bitwise the same result
+    if (moperr) return
+  else
   do i = 1, numat
 
     calci = (jopt(ired) == i)
@@ -160,12 +209,15 @@ subroutine hcore_for_MOZYME ()
           fnuc = -(efield(1)*coord(1, i) + efield(2)*coord(2, i) + &
                & efield(3)*coord(3, i)) * fldcon
           h(i2) = h(i2) + fnuc
+        else
+          if(lmolaris_qmmm) h(i2) = h(i2) - vqc(i)/fpc_9
         end if
       end do
     end if
     if (fldon) then
       enuclr = enuclr - fnuc * tore(nat(i))
     end if
+    if (lmolaris_qmmm) enuclr = enuclr + vqc(i)/fpc_9*tore(nat(i))
     !
     !   FILL THE ATOM-OTHER ATOM ONE-ELECTRON MATRIX<PSI(LAMBDA)|PSI(SIGMA)>
     !
@@ -390,6 +442,7 @@ subroutine hcore_for_MOZYME ()
       call wstore (w(kr), kr, ni, ii)
     end if
   end do
+  end if
  !
  !
   if (mode == -1) then
@@ -430,4 +483,121 @@ subroutine hcore_for_MOZYME ()
       write (iw, 10000) (wk(i), i=1, j)
     end if
   end if
+contains
+  subroutine hcore_rows_omp()
+! OpenMP version of the atom-pair loop of hcore_for_MOZYME, for a molecular system (id = 0) in the
+! default direct mode (semidr: rotate, outer1 and outer2 use w only as scratch and do not advance kr,
+! which changes only in wstore), mode 0, without an electric field, a QMMM potential or HCORE output.
+! Rows i are taken in blocks. Within a block the pairs (i, j < i) are computed in parallel, with
+! private scratch: each off-diagonal block of h belongs to one pair and is written directly; the
+! diagonal block of row i (one-center term, then e1b for j = 1, ..., i-1) is summed per row; the
+! e2a terms and the core-core energies are kept, and added afterwards in the serial order (rows in
+! order: enuclr, then the diagonal blocks of the atoms j < i). h, enuclr and the stored one-center
+! integrals (wstore) are therefore bitwise those of the serial loop for any number of threads. (Only
+! the scratch left in w beyond the last stored integrals differs; nothing reads it.)
+    integer :: i, j, nb, i0, nrow, r, t, k, ii, i1, j1, idum, ni_, nj_
+    integer(8) :: per_row, base
+    integer, allocatable :: tri(:), ptri(:), morb(:)
+    double precision, allocatable :: dsum(:,:), e2buf(:), enb(:,:)
+    double precision :: e1l(45), e2l(45), enl, wloc(2025), dil(9,9), xs(3), half1, x
+    double precision, external :: ss
+    half1 = 1.d0
+    allocate (tri(numat), ptri(numat + 1), morb(numat + 1))
+    ptri(1) = 0
+    morb(1) = 0
+    do i = 1, numat
+      tri(i) = (iorbs(i)*(iorbs(i) + 1))/2
+      ptri(i + 1) = ptri(i) + tri(i)
+      morb(i + 1) = morb(i) + iorbs(i)
+    end do
+! Rows per block: about 64 MB of buffers (e2a terms and core-core energies per row), at least 4 per thread.
+    per_row = int(ptri(numat + 1), 8) + int(numat, 8)
+    nb = int(min(int(numat, 8), max(int(4*nthr, 8), 8000000_8/max(1_8, per_row))))
+    allocate (dsum(45, nb), e2buf(int(nb, 8)*int(ptri(numat + 1), 8) + 1), enb(numat, nb))
+! One-time initializations inside the integral routines (saved state) happen here, before any thread
+! runs: diat sets its element table once per calculation, ss its binomials on its first call
+! (diat and ss run inside the critical section below, but this keeps the order of initialization fixed).
+    xs = (/1.d0, 0.d0, 0.d0/)
+    call diat (nat(1), nat(1), xs, dil)
+    x = ss (1, 1, 1, 1, 1, 1.d0, 1.d0, 1.d0, a0)
+    do i0 = 1, numat, nb
+      nrow = min(nb, numat - i0 + 1)
+!$omp parallel do schedule(dynamic, 1) default(shared) &
+!$omp private(r, i, j, k, ii, i1, j1, t, idum, ni_, nj_, base, e1l, e2l, enl, wloc, dil)
+      do r = 1, nrow
+        i = i0 + r - 1
+        ni_ = nat(i)
+        dsum(1:max(1, tri(i)), r) = 0.d0
+        do i1 = 1, iorbs(i)
+          dsum((i1*(i1 + 1))/2, r) = uspd(morb(i) + i1)
+        end do
+        base = int(r - 1, 8)*int(ptri(numat + 1), 8)
+        do j = 1, i - 1
+          nj_ = nat(j)
+          k = ijbo(i, j)
+          if (k >= 0) then
+! h1elec -> diat2 -> set use module variables of overlaps_C (isp, ips, a, b, sa, sb) as scratch, so
+! overlaps are computed one at a time (pairs within the overlap cutoff only). Making those variables
+! threadprivate instead changes nvfortran's code for them (FMA contraction) and so the last bits of h.
+!$omp critical (hcore_overlap)
+            call h1elec (ni_, nj_, coord(1, i), coord(1, j), dil)
+!$omp end critical (hcore_overlap)
+            ii = k
+            do i1 = 1, iorbs(i)
+              do j1 = 1, iorbs(j)
+                ii = ii + 1
+                h(ii) = h(ii) + dil(i1, j1)
+              end do
+            end do
+            idum = 1
+            call rotate (ni_, nj_, coord(1, i), coord(1, j), wloc, idum, e1l, e2l, enl)
+          else if (k == -2) then
+            idum = 1
+            call outer2 (ni_, nj_, coord(1, i), coord(1, j), wloc, idum, e1l, e2l, enl, id, semidr)
+          else
+            idum = 1
+            call outer1 (ni_, nj_, coord(1, i), coord(1, j), wloc, idum, e1l, e2l, enl, 0, semidr)
+          end if
+          enb(j, r) = enl
+          do t = 1, tri(i)
+            dsum(t, r) = dsum(t, r) + e1l(t)*half1
+          end do
+          do t = 1, tri(j)
+            e2buf(base + ptri(j) + t) = e2l(t)
+          end do
+        end do
+      end do
+!$omp end parallel do
+      do r = 1, nrow
+        i = i0 + r - 1
+        if (tri(i) > 0) then
+          ii = ijbo(i, i)
+          do t = 1, tri(i)
+            h(ii + t) = dsum(t, r)
+          end do
+        end if
+        base = int(r - 1, 8)*int(ptri(numat + 1), 8)
+! enuclr is summed in this loop, not in a loop of its own: a bare sum loop may be vectorized with
+! reassociated additions (nvfortran without -Kieee), which changes the last bits.
+        do j = 1, i - 1
+          enuclr = enuclr + enb(j, r)
+          ii = ijbo(j, j)
+          do t = 1, tri(j)
+            h(ii + t) = h(ii + t) + e2buf(base + ptri(j) + t)*half1
+          end do
+        end do
+        if (i > 1 .and. kr > krmax - 100 .and. i /= numat) then
+          write (iw,*) kr, krmax
+          write (iw, "(' Running out of storage for W in HCORE ')")
+          write (iw,*) " NUMBER OF ATOMS CALCULATED FOR 'W':", i
+          write (iw,*) " NUMBER OF ATOMS IN SYSTEM:", numat
+          call mopend ("Running out of storage for W in HCORE")
+          deallocate (tri, ptri, morb, dsum, e2buf, enb)
+          return
+        end if
+        if (tri(i) /= 0) call wstore (w(kr), kr, nat(i), tri(i))
+      end do
+    end do
+    deallocate (tri, ptri, morb, dsum, e2buf, enb)
+  end subroutine hcore_rows_omp
 end subroutine hcore_for_MOZYME

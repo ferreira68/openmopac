@@ -1,22 +1,21 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine flepo(xparam, nvar, funct1)
       use molkst_C, only : numcal, gnorm, iflepo, keywrd, emin, tleft, &
-      & time0, moperr, nscf, limscf, tdump, last, cosine, line
+      & time0, moperr, nscf, limscf, tdump, last, cosine, line, use_disk
       use common_arrays_C, only : hesinv, grad
       USE chanel_C, only : iw, ilog, log, input_fn
       implicit none
@@ -184,7 +183,7 @@
 !  ORDER OF PRECISION:   'GNORM' TAKES PRECEDENCE OVER 'FORCE', WHICH
 !                        TAKES PRECEDENCE OVER 'PRECISE'.
         tolerg = 1.0D0
-        if (index(keywrd,'PREC') /= 0) tolerg = 0.2D0
+        if (index(keywrd,'PRECISE') /= 0) tolerg = 0.2D0
         if (index(keywrd,'FORCE') /= 0) tolerg = 0.1D0
 !
 !      READ IN THE GRADIENT-NORM LIMIT, IF SPECIFIED
@@ -204,7 +203,7 @@
         delhof = 0.0010D0*const
         tolerf = 0.002D0*const
         tolrg = tolerg
-        if (index(keywrd,'PREC') /= 0) then
+        if (index(keywrd,'PRECISE') /= 0) then
           tolerx = tolerx*0.01D0
           delhof = delhof*0.01D0
           tolerf = tolerf*0.01D0
@@ -742,7 +741,7 @@
             ' DURING THESE ATTEMPTS THE ENERGY DROPPED',' BY LESS THAN',f4.1,&
             ' KCAL/MOLE',/,10x,&
             ' FURTHER CALCULATION IS NOT JUSTIFIED AT THIS TIME.')
-          if (index(keywrd,'PREC') == 0) write (iw, 390)
+          if (index(keywrd,'PRECISE') == 0) write (iw, 390)
   390     format(10x,' TO CONTINUE, START AGAIN WITH THE WORD "PRECISE"')
           last = 1
           call compfg (xparam, .TRUE., funct1, .TRUE., grad, .FALSE.)
@@ -803,8 +802,10 @@
            tprt, txt, Min (gnorm, 999999.999d0), funct1
         write(iw,"(a)")trim(line)
         call to_screen(trim(line))
-        endfile (iw)
-        backspace (iw)
+        if (use_disk) then
+          endfile (iw)
+          backspace (iw)
+        end if
         if (log) then
           write (ilog, "(a)")trim(line)
           endfile (ilog)
@@ -816,7 +817,7 @@
           & f6.2, a1, "  GRAD.:", f10.3, " HEAT:", g14.7)') &
           jcyc, Min (tcycle, 9999.99d0), tprt, txt, &
           & Min (gnorm, 999999.999d0), funct1
-          if (minprt) then
+          if (minprt .and. use_disk) then
             write(iw,"(a)")trim(line)
             endfile (iw)
             backspace (iw)

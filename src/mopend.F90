@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine mopend(txt)
 !-----------------------------------------------
@@ -42,7 +41,7 @@
 !
 !
         use chanel_C, only : iw, ir
-        use molkst_C, only : line, job_no, natoms
+        use molkst_C, only : line, job_no, job_no0, natoms, dummy, errtxt
         implicit none
         integer, intent (in) :: ntxt
         character, intent (in) :: txt*(*)
@@ -54,6 +53,23 @@
         integer :: nmessages = 0, i, j, max_txt
         logical :: first = .true., opend
         save
+! vvv MOPAC API hijacking of the error handler vvv
+        ! report number of errors in dummy
+        if (ntxt == 0) then
+          dummy = nmessages
+          return
+        ! record error message in errtxt
+        else if (ntxt < 0) then
+          ! reset error handler
+          if (ntxt < -nmessages) then
+            first = .true.
+            nmessages = 0
+            return
+          end if
+          errtxt = trim(messages(-ntxt))
+          return
+        end if
+! ^^^ MOPAC API hijacking of the error handler ^^^
         if (first) then
            messages(1)(:18) = "JOB ENDED NORMALLY"
            first = .false.
@@ -66,7 +82,7 @@
            end if
         end if
         if (ntxt == 1) then
-          if (natoms == 0 .and. job_no == 1) then
+          if (natoms == 0 .and. job_no == job_no0) then
             write(iw,'(/10x, a)')"Job failed to run because no atoms were detected in the system"
             write(iw,'(10x, a, /)')"The start of the data-set is as follows:"
             rewind (ir)

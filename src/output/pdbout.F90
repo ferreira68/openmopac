@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine pdbout (mode1)
     use molkst_C, only: numat, natoms, ncomments, verson, line, nbreaks, id, &
@@ -309,12 +308,12 @@ subroutine pdbout (mode1)
     write(iprt,"(a)")"}"
     write(iprt,"(a)")"</style>"
     write(iprt,"(a)") "<!--"," ","   Start of JSmol script"," ", "-->"
-    write(iprt,"(a)") "<meta charset=""utf-8""> <script type=""text/javascript"" src=""../jsmol/JSmol.min.js""></script>  "
+    write(iprt,"(a)") "<meta charset=""utf-8""> <script type=""text/javascript"" src=""/jsmol/JSmol.min.js""></script>  "
     write(iprt,"(a)") "<script type=""text/javascript"">"
     write(iprt,"(/a)") "$(document).ready(function() {Info = {"
     write(iprt,"(10x,a)") "width: 1500,", "height: 1000,", "color: ""0xB0B0B0"",", &
-    "disableInitialConsole: true, ", "addSelectionOptions: false,", "j2sPath: ""../jsmol/j2s"",", &
-    "jarPath: ""../jsmol/java"",", "use: ""HTML5"", script: ", " "
+    "disableInitialConsole: true, ", "addSelectionOptions: false,", "j2sPath: ""/jsmol/j2s"",", &
+    "use: ""HTML5"", script: ", " "
     write(iprt,"(a)")"// Data set to be loaded", " "
     if (index(keywrd, " GRAPHF") /= 0) then
       line = input_fn(:len_trim(input_fn) - 4)//"mgf"

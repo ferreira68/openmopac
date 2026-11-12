@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine Locate_TS
 !
@@ -292,7 +291,7 @@ subroutine Locate_TS
       call add_path(line)
       inquire(unit=ipdb, opened=opend)
       if (opend) close(ipdb)
-      open(unit=ipdb, file=trim(line), status='UNKNOWN', position='asis')
+      open(unit=ipdb, file=trim(line))
       call pdbout(ipdb)
       close (ipdb)
     end if
@@ -315,7 +314,7 @@ subroutine Locate_TS
 !    Mathematical Programming B, 45, 3, pp. 503-528.
 !
   use molkst_C, only: tleft, time0, iflepo, tdump, gnorm, keywrd, density, &
-  moperr, nvar, id, line, numat, refkey, title
+  moperr, nvar, id, line, numat, refkey, title, use_disk
 !
   use chanel_C, only: iw0, iw, log, ilog, input_fn, iarc
 !
@@ -371,7 +370,7 @@ subroutine Locate_TS
   else
     tolerg = 1.d0
     if (id /= 0) tolerg = id*2.d0 - 1.d0
-    if (Index (keywrd, " PREC") /= 0) then
+    if (Index (keywrd, " PRECISE") /= 0) then
       tolerg = tolerg*0.2d0
     end if
   end if
@@ -530,8 +529,10 @@ subroutine Locate_TS
       jcyc, Min (tstep, 9999.99d0), tprt, txt, &
       & Min (gnorm, 999999.999d0), escf_tot
     write(iw,"(a)")trim(line)
-    endfile (iw)
-    backspace (iw)
+    if (use_disk) then
+      endfile (iw)
+      backspace (iw)
+    end if
     if (log) write (ilog, "(a)")trim(line)
     call to_screen(line)
     if (mod(jcyc,30) == 0) then
@@ -541,7 +542,7 @@ subroutine Locate_TS
       call to_screen(line(:i))
     end if
     if (nflush /= 0) then
-      if (Mod(jcyc, nflush) == 0) then
+      if (Mod(jcyc, nflush) == 0 .and. use_disk) then
         endfile (iw)
         backspace (iw)
         if (log) then
@@ -556,8 +557,10 @@ subroutine Locate_TS
 !  with the old gradient.  Ideally, this should be small.
 !
       call dcopy (big_nvar, big_grad, 1, gold, 1)
-      endfile (iw)
-      backspace (iw)
+      if (use_disk) then
+        endfile (iw)
+        backspace (iw)
+      end if
 !
 !  EXIT CRITERIA.  (The criteria in SETULB are ignored.)
 !
@@ -633,7 +636,7 @@ subroutine Locate_TS
     call add_path(line)
     inquire(unit=iarc, opened=opend)
     if (opend) close(iarc)
-    open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+    open(unit=iarc, file=trim(line))
     write(iw,'(/10x,a,/10x,a,f'//fmt//',a,/10x,a,/)')"First geometry (derived from data-set) after optimization subject to ", &
     &"GEO_REF constraint of ", density, " Kcal/mol/Angstrom^2 towards the reference geometry written to file:", &
     &"'"//trim(line)//"'"
@@ -652,7 +655,7 @@ subroutine Locate_TS
     call add_path(line)
     inquire(unit=iarc, opened=opend)
     if (opend) close(iarc)
-    open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+    open(unit=iarc, file=trim(line))
     write(iw,'(/10x,a,/10x,a,f'//fmt//',a,/10x,a,/)')"Second geometry (derived from reference geometry)"// &
     & "after optimization subject to ", "GEO_REF constraint of ", density, &
     " Kcal/mol/Angstrom^2 towards the data-set geometry written to file:", "'"//trim(line)//"'"
@@ -700,7 +703,7 @@ subroutine Locate_TS
     call add_path(line)
     inquire(unit=iarc, opened=opend)
     if (opend) close(iarc)
-    open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+    open(unit=iarc, file=trim(line))
      write(iw,'(/10x,a,/10x,a,f'//fmt//',a,/10x,a,/)')"Average of first and second geometries after optimization subject to ", &
     &"GEO_REF constraint of ", density, " Kcal/mol/Angstrom^2 towards the data-set geometry written to file:", &
     &"'"//trim(line)//"'"
@@ -1462,7 +1465,7 @@ subroutine Locate_TS
     implicit none
     integer, intent (in) :: loop
     logical, intent (in) :: extra_print, l_ts, l_nllsq, l_sigma
-    logical, intent (out) :: converged
+    logical, intent (inout) :: converged
 !
 !  Local
 !
@@ -1494,7 +1497,7 @@ subroutine Locate_TS
       call add_path(line)
       inquire(unit=iarc, opened=opend)
       if (opend) close(iarc)
-      open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+      open(unit=iarc, file=trim(line))
       write(iw,'(/10x,a,i2,a,/10x,a,/)')"Transition state on cycle",loop, " written to file:", &
       &"'"//trim(line)//"'"
       call geout (iarc)
@@ -1525,7 +1528,7 @@ subroutine Locate_TS
       call add_path(line)
       inquire(unit=iarc, opened=opend)
       if (opend) close(iarc)
-      open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+      open(unit=iarc, file=trim(line))
       do i = 1, nvar
         geo(loc(2,i),loc(1,i)) = xparam(i)
       end do

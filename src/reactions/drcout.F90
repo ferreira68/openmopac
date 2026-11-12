@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine drcout(xyz3, geo3, vel3, nvar, time, escf3, ekin3, etot3, dip3, &
         xtot3, iloop, charge, fract, text1, text2, ii, jloop, l_dipole)
@@ -20,7 +19,7 @@
 !   M o d u l e s
 !-----------------------------------------------
       use common_arrays_C, only : na, nb, nc, labels, loc, nat, c, eigs
-      use molkst_C, only : natoms, numcal, keywrd, numat, title, koment, line
+      use molkst_C, only : natoms, numcal, keywrd, numat, title, koment, line, norbs
       use maps_C, only : rxn_coord, rc_escf, ekin, rc_dipo
       use elemts_C, only : elemnt
       use chanel_C, only : iw
@@ -38,6 +37,7 @@
       double precision, dimension(3,numat) :: xyz, vel
       double precision, dimension(3) :: gg
       double precision :: etot, errr, last_point, last_rxn_coord = 10.d0
+      double precision, dimension (:), allocatable :: popmat
       logical :: drc, large, graph, run_local
       character :: alpha*2, frmat*1
       double precision, external :: reada
@@ -98,7 +98,7 @@
           last_rxn_coord = rxn_coord
         end if
       end if
-      if (jloop==0 .or. (jloop/iprint)*iprint==jloop) then
+      if (jloop==0 .or. mod(jloop-1,iprint)==0) then
         if (drc) then
           write (line, '('' FEMTOSECONDS  POINT  POTENTIAL + KINETIC  =   TOTAL     ERROR    REF%   MOVEMENT'')')
         else
@@ -168,7 +168,9 @@
       end do
       if (graph) then
         if (run_local)  call local (c, i, eigs, 0, "c ")
-        call mullik ()
+        allocate(popmat((norbs*(norbs+1))/2))
+        call mullik (popmat)
+        deallocate(popmat)
       end if
       call to_screen("To_file: IRC-DRC")
       if (index(keywrd," LDRC_FIRST") /= 0) then

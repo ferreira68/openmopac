@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
    !***********************************************************************
@@ -29,6 +28,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     use MOZYME_C, only : lijbo, nijbo, ncf, ncocc, &
       nncf, iorbs, cocc, icocc
     use chanel_C, only: iw
+    use acc_mozyme_C, only : pd_ok, acc_path_note
     implicit none
     integer, intent (in) :: mode, nclose_loc
     double precision, dimension (mpack), intent (in) :: partp
@@ -38,9 +38,46 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     integer :: i, j, j1, ja, jj, k, k1, k2, ka, kk, l, loop, nj
     double precision :: spinfa, sum
     integer, external :: ijbo
+    integer, external :: acc_density_mode
+    integer :: gmode
+    integer(8) :: gc0, gc1, grate
+    double precision :: tg
+    double precision, allocatable :: pg(:)
+    logical :: gok
     if (first) then
       first = .false.
       prnt = Index (keywrd, " DIAG ") /= 0
+    end if
+    !
+    !  GPU (OpenACC) version, MOPAC_ACC_DENS set, full density only (acc_density_mozyme.F90).
+    !  "test": the GPU result goes into a copy and is compared with the CPU result.
+    !  The device copy of P is no longer current once P is rebuilt here on the CPU.
+    !
+    pd_ok = .false.
+    gmode = 0
+    if (mode == 0 .and. lijbo) then
+      gmode = acc_density_mode()
+    else if (acc_density_mode() /= 0) then
+      if (.not. lijbo) then
+        call acc_path_note('density (no atom-pair index table)')
+      else
+        call acc_path_note('density (partial updates: only some atoms move)')
+      end if
+    end if
+    if (gmode == 1) then
+      call acc_density_core (p, nclose_loc, .true., gok)
+      if (gok) go to 900
+      gmode = 0                                ! not enabled or no device memory: CPU below
+    else if (gmode == 2) then
+      allocate (pg(mpack))
+      call system_clock (gc0, grate)
+      call acc_density_core (pg, nclose_loc, .false., gok)
+      call system_clock (gc1)
+      tg = dble(gc1 - gc0)/dble(grate)
+      if (.not. gok) then
+        deallocate (pg)
+        gmode = 0
+      end if
     end if
     if (mode == 0) then
       !
@@ -145,6 +182,11 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     if (Abs(spinfa - 1.d0) > 1.d-10) then
       p(:) = spinfa * p(:)
     end if
+    if (gmode == 2) then
+      call acc_density_compare (p, pg, tg)
+      deallocate (pg)
+    end if
+900 continue
     if (prnt) then
       sum = 0.d0
       if (lijbo) then

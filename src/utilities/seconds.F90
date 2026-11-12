@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       double precision function seconds (mode)
 !
@@ -21,7 +20,7 @@
 !                 if <file>.end exists, and contains anything, increase time by 10^8 seconds.
 !
       USE chanel_C, only : iw, iend, end_fn, output_fn
-      use molkst_C, only : is_PARAM, wall_clock_0, wall_clock_1, CPU_1, CPU_0, prt_coords
+      use molkst_C, only : is_PARAM, wall_clock_0, wall_clock_1, CPU_1, CPU_0, prt_coords, use_disk
       implicit none
       integer , intent(in) :: mode
       double precision :: shut
@@ -48,21 +47,23 @@
 !
 !   CHECK TO SEE IF AN OLD '.end' FILE EXISTS.  IF IT DOES, DELETE IT.
 !
-        rewind iend
-        open(unit=iend, file=end_fn, status='UNKNOWN', position='asis', iostat = i99)
-        if (i99 /= 0) then
-          write(iw,"(a)")" File '"//trim(end_fn)//"' is unavailable for use"
-          write(iw,"(a)")" Correct the error and re-submit"
-          call to_screen(" File '"//trim(end_fn)//"' is unavailable for use")
-          call to_screen(" Correct the error and re-submit")
-          call mopend("File '"//trim(end_fn)//"' is unavailable for use")
-          return
-        end if
-        read (iend, '(A)', end=20, err=20, iostat = i99) x
+        if (use_disk) then
+          rewind iend
+          open(unit=iend, file=end_fn, iostat = i99)
+          if (i99 /= 0) then
+            write(iw,"(a)")" File '"//trim(end_fn)//"' is unavailable for use"
+            write(iw,"(a)")" Correct the error and re-submit"
+            call to_screen(" File '"//trim(end_fn)//"' is unavailable for use")
+            call to_screen(" Correct the error and re-submit")
+            call mopend("File '"//trim(end_fn)//"' is unavailable for use")
+            return
+          end if
+          read (iend, '(A)', end=20, err=20, iostat = i99) x
 !
 !   FILE EXISTS.  DELETE IT.
 !
-        if (ichar(x) /= (-1)) close(iend, status='DELETE')
+          if (ichar(x) /= (-1)) close(iend, status='DELETE')
+        end if
 !
 !  Set the zero of time
 !
@@ -81,11 +82,11 @@
 !   THEN INCREMENT CPU TIME BY 10,000,000 SECONDS.
 !
 !***********************************************************************
-      if (mode == 2) then
+      if (mode == 2 .and. use_disk) then
         shut = 0.D0
         inquire (file=end_fn, exist = exists)
         if (exists) then
-          open(unit=iend, file=end_fn, status='UNKNOWN', position='asis', iostat=i99)
+          open(unit=iend, file=end_fn, iostat=i99)
           if (i99 /= 0) then
             close(iend, err=99)   ! Do not stop job if shutdown is faulty
     99      return
@@ -123,6 +124,7 @@
       seconds = dble(wall_clock_1 - wall_clock_0) + shut
 
       if (is_PARAM) return
+      if (.not. use_disk) return
  11   endfile (iw, iostat = i99)
       l = 0
       if (i99 /= 0) then
@@ -132,7 +134,7 @@
         call sleep(5)
         inquire(unit=iw, opened=opend)
         if (opend) close (iw)
-        open(unit=iw, file=output_fn, status='UNKNOWN', position='asis')
+        open(unit=iw, file=output_fn)
         if (l < 20) goto 11
         write(0,"(a)") "Job abandoned due to output file being unavailable"
         call mopend("Job abandoned due to output file being unavailable")

@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 module molkst_C
 !
@@ -107,6 +106,7 @@ module molkst_C
                  !  Each stage is limited to the same electronic structure.  Most calculations
                  !  will only have one stage, e.g. geometry optimization or force constants.
                  !
+  &  job_no0, numcal0, step_num0, & ! Needed for repeated API calls to run_mopac
   &  mpack,    & !  Number of elements in a lower-half-triangle = (norbs*(norbs+1))/2
   &  n2elec,   & !  Number of two-electron integrals
   &  nscf,     & !  Number of SCF calculations done
@@ -235,6 +235,9 @@ module molkst_C
   &  press(3),     & ! Type         Pressure on crystal faces
                      ! Definition   Pressure required to stop crystal expanding
                      ! Units        Gigapascals
+  &  voigt(6),     & ! Type         Stress tensor in Voigt notation (xx, yy, zz, yz, xz, xy)
+                     ! Definition   Stress tensor is a symmetric 3-by-3 matrix represented by 6 distinct values
+                     ! Units        Gigapascals
   &  E_disp,       & ! Dispersion term
   &  E_hb,         & ! Hydrogen-bond term
   &  E_hh,         & ! Hydrogen-hydrogen repulsion term (to correct for short H - H interactions)
@@ -254,9 +257,21 @@ module molkst_C
   & formula*100,   & !  Type          Empirical formula
                      !  Definition    Type and number count of each element in the system
                      !  Units         Text
-  & git_hash*40 = 'unknown', & !  Git commit hash string
-  & os*12 = 'unknown', &       !  Operating system name
-  & verson*20 = '22.*.*'       !  Version number for this copy of MOPAC
+#ifdef MOPAC_GIT_HASH
+  & git_hash*40 = MOPAC_GIT_HASH, & !  Git commit hash string
+#else
+  & git_hash*40 = 'unknown', & !  Generic git commit hash string when hash is unavailable
+#endif
+#ifdef MOPAC_OS
+  & os*12 = MOPAC_OS, &       !  Operating system name
+#else
+  & os*12 = 'unknown', &       !  Generic operating system name when OS is unknown
+#endif
+#ifdef MOPAC_VERSION_FULL
+  & verson*20 = MOPAC_VERSION_FULL !  Version number for this copy of MOPAC
+#else
+  & verson*20 = '23.*.*'       !  Generic version number when version is unknown
+#endif
                      !  Pattern      "xx.yy.zz(-pre)"
                      !  Description  major version, minor version, patch version, & pre-release tag
   character ::     &
@@ -280,11 +295,10 @@ module molkst_C
      limscf,            & !  Convergence criterion for SCF: if TRUE, then exit the SCF
                           !  if the energy changes a lot (useful in geometry optimization)
                           !  if FALSE, then converge the SCF to the default criterion
-     gui = .true.,      & !  By default, output information for a Graphical User Interface
      lxfac,             & !  TRUE if a diatomic is being used to define the values of XFAC and ALPB
      units,             & !  TRUE if units for input geometry are defined (Angstroms or A0), FALSE otherwise
      Angstroms,         & !  TRUE if units for input geometry must be in Angstroms, if FALSE then A0, see also units
-     Sparkle,           & !  TRUE if basis set is missing and sparkles are present (any of elements 58:70)
+     sparkle,           & !  TRUE if basis set is missing and sparkles are present (any of elements 58:70)
      keep_res,          & !  TRUE if the original residue names are to be used
      use_ref_geo,       & !  TRUE if keyword GEO_REF is used
      pdb_label,         & !  TRUE if label text is in PDB format
@@ -303,7 +317,8 @@ module molkst_C
      prt_velocity,      & ! TRUE if velocity vector in IRC/DRC to be printed
      dummy_present,     & !
      l_normal_html,     & ! TRUE if a normal HTML file is to be generated. After it's generated, set FALSE
-     is_PARAM=.false.     !  This will be set "TRUE" in a PARAM run
+     is_PARAM=.false.,  & !  This will be set "TRUE" in a PARAM run
+     use_disk=.true.      ! TRUE if disk access is allowed for functionality supported by MOPAC API
   equivalence  &
     (MM_corrections(1), N_3_present),    & ! TRUE if the system contains at least one N bonded to three ligands
                                            ! and at least two are not hydrogen atoms
@@ -350,4 +365,7 @@ module molkst_C
     & (methods(13),  method_PM6_D3_not_H4), (methods(14), method_PM7), (methods(15),  method_pm7_ts), &
     & (methods(16),  method_PM7_HH), (methods(17),  method_PM7_minus), (methods(18),  method_pm6_org), &
     & (methods(19),  method_PM8), (methods(20), method_indo)
+! Device copies for the OpenACC NDDO pair-integral routines (ignored without OpenACC).
+!$acc declare create(id, l_feather, method_am1, method_mndod, method_pm6, method_pm6_org, method_pm7, &
+!$acc& method_pm8, mpack, trunc_1, trunc_2)
 end module molkst_C

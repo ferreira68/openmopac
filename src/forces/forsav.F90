@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine forsav(time, deldip, ipt, fmatrx, coord, nvar, refh, evecs, &
         jstart, fconst)
@@ -20,7 +19,7 @@
 !   M o d u l e s
 !-----------------------------------------------
       USE chanel_C, only : iw, ires, restart_fn
-      use molkst_C, only : numat, norbs
+      use molkst_C, only : numat, norbs, use_disk
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
@@ -53,6 +52,7 @@
 !               = 0 IF IN READ MODE.
 !        FMATRX = FORCE MATRIX
 !***********************************************************************
+      if (.not. use_disk) return
       i99 = 0
    10 continue
       j = i99
@@ -65,8 +65,7 @@
           return
         end if
       end if
-      open(unit=ires, file=restart_fn, status='UNKNOWN', &
-      form='UNFORMATTED', iostat=i99, position='asis')
+      open(unit=ires, file=restart_fn, form='UNFORMATTED', iostat=i99)
       if (i99 /= 0) then
         if (j /= 0) then
           call mopend ('Fatal error in trying to open RESTART file')
@@ -76,8 +75,7 @@
 !   A restart file exists, but cannot be mounted.  Delete it.
 !   If it can't be deleted, carry on regardless.
 !
-        open(unit=ires, file=restart_fn, status='OLD', iostat=i99, &
-          position='asis')
+        open(unit=ires, file=restart_fn, status='OLD', iostat=i99)
         close(ires, status='DELETE', iostat=i99)
         go to 10
       end if

@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine moldat(mode)
 !-----------------------------------------------
@@ -250,7 +249,7 @@ subroutine moldat(mode)
                     if (line(i:i) == "/" .or. line(i:i) == backslash) exit
                   end do
                 end if
-              open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+              open(unit=iarc, file=trim(line))
               rewind iarc
               call pdbout(iarc)
             end if
@@ -950,14 +949,15 @@ subroutine setcup
    !
    !***********************************************************************
     use molkst_C, only: cutofp, id, keywrd, l1u, l2u, l3u, l123, l11, l21, l31, line, &
-      clower
-    use common_arrays_C, only : tvec
+      clower, numat
+    use common_arrays_C, only : tvec, coord
     use chanel_C, only: iw
     implicit none
-    integer :: i
+    integer :: i, j
     double precision :: area12, area13, area23, r1, r12, r13, r2, &
-         & r23, r3, tv1, tv2, tv3, vol, sum
-    double precision, external :: reada, volume
+         & r23, r3, tv1, tv2, tv3, vol, sum, lcoord, lcoord_min(3), lcoord_max(3)
+    double precision, dimension (3, 3) :: lvec, rvec
+    double precision, external :: reada, volume, dot
     cutofp = 1.d10
     l1u = 0
     l2u = 0
@@ -1087,14 +1087,80 @@ subroutine setcup
       l2u = Int ((cutofp*4.d0/3.d0)/tv2) + 1
       l3u = Int ((cutofp*4.d0/3.d0)/tv3) + 1
     end if
+!
+! the previous block of setcup is preserved for its error checking,
+! but it does not produce reliable translation vector bounds, which are recomputed below
+!
+! Construct artificial orthogonal lattice vectors for lower-dimensional crystals
+    lvec(:,1) = tvec(:,1)
+    if(id > 1) then
+      lvec(:,2) = tvec(:,2)
+    else ! first orthogonal lattice vector in Cartesian plane of largest overlap
+      if(abs(lvec(1,1)) < abs(lvec(2,1)) .and. abs(lvec(1,1)) < abs(lvec(3,1))) then
+        lvec(1,2) = 0.d0
+        lvec(2,2) = tvec(3,1)
+        lvec(3,2) = -tvec(2,1)
+      else if(abs(lvec(2,1)) < abs(lvec(1,1)) .and. abs(lvec(2,1)) < abs(lvec(3,1))) then
+        lvec(1,2) = tvec(3,1)
+        lvec(2,2) = 0.d0
+        lvec(3,2) = -tvec(1,1)
+      else
+        lvec(1,2) = tvec(2,1)
+        lvec(2,2) = -tvec(1,1)
+        lvec(3,2) = 0.d0
+      end if
+    end if
+    if(id == 3) then
+      lvec(:,3) = tvec(:,3)
+    else ! second orthogonal lattice vector from cross product
+      call cross(lvec(:,1), lvec(:,2), lvec(:,3))
+    end if
+! Construct reciprocal lattice vectors (normalized to 1 instead of 2*pi against lattice vectors)
+    call cross(lvec(:,2), lvec(:,3), rvec(:,1))
+    call cross(lvec(:,3), lvec(:,1), rvec(:,2))
+    call cross(lvec(:,1), lvec(:,2), rvec(:,3))
+    vol = dot(rvec(:,1), lvec(:,1), 3)
+    rvec = rvec/vol
+! Evaluate minimum and maximum atomic positions in lattice coordinates
+    do i=1, 3
+      lcoord_min(i) = dot(rvec(:,i), coord(:,1), 3)
+    end do
+    lcoord_max = lcoord_min
+    do i=2, numat
+      do j=1, 3
+        lcoord = dot(rvec(:,j), coord(:,i), 3)
+        if(lcoord < lcoord_min(j)) lcoord_min(j) = lcoord
+        if(lcoord > lcoord_max(j)) lcoord_max(j) = lcoord
+      end do
+    end do
+! Evaluate maximum lattice summation values that connect the central cell to all atoms
+! within a radius of cutofp
+    l1u = ceiling(sqrt(dot(rvec(:,1), rvec(:,1), 3))*cutofp + lcoord_max(1) - lcoord_min(1))
+    if(id > 1) then
+      l2u = ceiling(sqrt(dot(rvec(:,2), rvec(:,2), 3))*cutofp + lcoord_max(2) - lcoord_min(2))
+    else
+      l2u = 0
+    end if
+    if(id == 3) then
+      l3u = ceiling(sqrt(dot(rvec(:,3), rvec(:,3), 3))*cutofp + lcoord_max(3) - lcoord_min(3))
+    else
+      l3u = 0
+    end if
     l123 = (2*l1u + 1)*(2*l2u + 1)*(2*l3u + 1)
     l11 = min(l1u,1)
     l21 = min(l2u,1)
     l31 = min(l3u,1)
+! Print an error if the number of unit cells in the sum is very large
+    if (l123 > 1331 .and. Index (keywrd, " GEO-OK") == 0) then
+      call mopend("Excessive size of lattice vector summation")
+      write(iw,'(10x,a)')"To avoid this problem, pack atoms more tightly in the central unit cell (try MAKPOL)"
+      write(iw,'(10x,a)')"To over-ride this safety check, add keyword 'GEO-OK'"
+      return
+    end if
 end subroutine setcup
 subroutine write_cell(iprt)
   use molkst_C, only: mol_weight, escf, numat, keywrd, gnorm, &
-   line, mers, density, gui
+   line, mers, density
   use funcon_C, only: fpc_10
   use common_arrays_C, only: nat, tvec
   use ef_C, only : nstep
@@ -1105,7 +1171,7 @@ subroutine write_cell(iprt)
   integer, dimension (100) :: nel
   double precision, external :: reada, volume
   save :: old_nstep
-  if (iprt < 0 .or. gui) return
+  if (iprt < 0) return
   if (iprt == 0) then
     if(old_nstep == nstep) return
     old_nstep = nstep
@@ -1275,82 +1341,157 @@ subroutine write_unit_cell_HOF(iprt)
          write(iprt,"(a)")line(:len_trim(line))
        end if
        return
-      end subroutine write_unit_cell_HOF
-      subroutine write_pressure(iprt)
-      use common_arrays_C, only: loc, tvec, na
-      use molkst_C, only: nvar, pressure, line, press
-      use funcon_C, only: fpc_10
-      use common_arrays_C, only : grad, xparam, labels
-      implicit none
-      integer, intent(in) :: iprt
-      integer :: m, i1,i2, k, l, i, ndim
-      double precision :: xi
-      double precision, dimension (nvar) :: dsum, dsum1
-      double precision, external :: ddot, volume
-      if (iprt < 0) return
-        m = 0
-        i1 = 0
-        i2 = 0
-        ndim = 0
-        do i = 1, nvar
-          k = loc(1, i)
-          l = labels(k)
-          xi = xparam(i)
-          if (l == 107 .and. (m == 0 .or. k == i1)) then
+end subroutine write_unit_cell_HOF
+subroutine calculate_voigt
+  use common_arrays_C, only: loc, tvec, na
+  use molkst_C, only: natoms, nvar, pressure, voigt
+  use funcon_C, only: fpc_10
+  use common_arrays_C, only : grad, xparam, labels
+  implicit none
+  integer :: m, i1, k, l, i
+  double precision :: xi
+  double precision, dimension (3) :: dsum, dsum1
+  double precision, external :: volume
+!  Accumulate stress tensor from gradients with x, y, & z components
+  voigt = 0.d0
+  m = 0
+  i1 = 0
+  do i = 1, nvar
+    k = loc(1, i)
+    l = labels(k)
+    xi = xparam(i)
+    if(k /= i1) m = 0
+    i1 = k
+    m = m + 1
+    dsum(m) = grad(i)
+    dsum1(m) = xparam(i)
+    ! complete 3-component derivative of an atom or translation vector
+    if (m == 3) then
+      voigt(1) = voigt(1) + dsum(1)*dsum1(1)
+      voigt(2) = voigt(2) + dsum(2)*dsum1(2)
+      voigt(3) = voigt(3) + dsum(3)*dsum1(3)
+      voigt(4) = voigt(4) + 0.5*(dsum(2)*dsum1(3) + dsum(3)*dsum1(2))
+      voigt(5) = voigt(5) + 0.5*(dsum(1)*dsum1(3) + dsum(3)*dsum1(1))
+      voigt(6) = voigt(6) + 0.5*(dsum(2)*dsum1(1) + dsum(1)*dsum1(2))
+    end if
+  end do
+!  Convert from enthalpy to internal energy
+  do i = 1, 3
+    voigt(i) = voigt(i) - pressure*volume (tvec, 3)
+  end do
+!  Convert units of stress tensor to GPa
+  xi = 1.d-9*(4184.d0*10.d0**30)/(fpc_10*volume (tvec, 3))
+  do i = 1, 6
+    voigt(i) = voigt(i) * xi
+  end do
+end subroutine calculate_voigt
+subroutine write_pressure(iprt)
+  use common_arrays_C, only: loc, tvec, na
+  use molkst_C, only: natoms, nvar, pressure, line, press, voigt
+  use funcon_C, only: fpc_10
+  use common_arrays_C, only : grad, xparam, labels
+  implicit none
+  integer, intent(in) :: iprt
+  integer :: m, i1,i2, k, l, i, ndim
+  double precision :: xi
+  double precision, dimension (nvar) :: dsum, dsum1
+  double precision, external :: ddot, volume
+  if (iprt < 0) return
+    voigt = 0.d0
+    m = 0
+    i1 = 0
+    i2 = 0
+    ndim = 0
+    do i = 1, nvar
+      k = loc(1, i)
+      l = labels(k)
+      xi = xparam(i)
+      if (l == 107 .and. (m == 0 .or. k == i1)) then
 !
 !  Atom is a Tv
 !
-            i1 = k
-            m = m + 1
-            dsum(m) = grad(i)
-            dsum1(m) = xparam(i)
-            if (m == 3) then
-              if (na(k) /= 0) then
-                if (iprt == 0) then
-                  call to_screen("The pressure required to constrain translation vectors")
-                  call to_screen("can only be calculated if Cartesian coordinates are used.")
-                else
-                  if (Abs(pressure) > 0.01d0) then
-                    write(iprt,'(/10x,a)')"The pressure required to constrain translation vectors"
-                    write(iprt,'(10x,a)')"can only be calculated if Cartesian coordinates are used."
-                  end if
-                end if
-                return
+        i1 = k
+        m = m + 1
+        dsum(m) = grad(i)
+        dsum1(m) = xparam(i)
+        if (m == 3) then
+          if (na(k) /= 0) then
+            if (iprt == 0) then
+              call to_screen("The pressure required to constrain translation vectors")
+              call to_screen("can only be calculated if Cartesian coordinates are used.")
+            else
+              if (Abs(pressure) > 0.01d0) then
+                write(iprt,'(/10x,a)')"The pressure required to constrain translation vectors"
+                write(iprt,'(10x,a)')"can only be calculated if Cartesian coordinates are used."
               end if
+            end if
+            return
+          end if
 !
 !  Determine the scalar of the component of the gradient vector in the
 !  direction of the translation vector
 !
-              xi = ddot(3,dsum, 1,dsum1,1)
+          xi = ddot(3,dsum, 1,dsum1,1)
 !
 !  Convert this into a pressure = force per unit area
 !
-              xi = -(4184.d0*10.d0**30)/fpc_10 * xi/volume (tvec, 3)
-              if (Abs(xi) < 1.d-20) cycle ! suppress printing if gradients are zero
-              if (i2 == 0) then
-                write(line,'(a)') "          Pressure required to constrain translation vectors"
-                if (iprt == 0) then
-                  call to_screen(trim(line))
-                else
-                  write(iprt,*)trim(line)
-                end if
-                i2 = 1
-              end if
-              xi = (xi - pressure * (4184.d0*10.d0**30)/ fpc_10)*1.d-9
-              ndim = ndim + 1
-              press(ndim) = xi
-              write(line,'(10x,a,i4,a,f7.2,a)')"Tv(", k,")  Pressure:",xi," GPa"
-               if (iprt == 0) then
-                  call to_screen(trim(line))
-                else
-                  write(iprt,*)trim(line)
-                end if
-              m = 0
+          xi = -(4184.d0*10.d0**30)/fpc_10 * xi/volume (tvec, 3)
+          if (Abs(xi) < 1.d-20) cycle ! suppress printing if gradients are zero
+          if (i2 == 0) then
+            write(line,'(a)') "          Pressure required to constrain translation vectors"
+            if (iprt == 0) then
+              call to_screen(trim(line))
+            else
+              write(iprt,*)trim(line)
             end if
+            i2 = 1
           end if
-        end do
-  end subroutine write_pressure
-  subroutine setup_nhco(ii)
+          xi = (xi + pressure * (4184.d0*10.d0**30)/ fpc_10)*1.d-9
+          ndim = ndim + 1
+          press(ndim) = xi
+          write(line,'(10x,a,i4,a,f7.2,a)')"Tv(", k,")  Pressure:",xi," GPa"
+           if (iprt == 0) then
+              call to_screen(trim(line))
+            else
+              write(iprt,*)trim(line)
+            end if
+          m = 0
+        end if
+      end if
+    end do
+!  Accumulate stress tensor
+    if (nvar == 3*natoms) then
+      call calculate_voigt()
+      xi = 0.d0
+      do i = 1, 6
+        xi = xi + Abs(voigt(i))
+      end do
+      ! nvar doesn't guarantee gradients are calculated,
+      ! suppress exactly zero stress, assuming that gradients were not evaluated in that case
+      if (xi /= 0.d0) then
+    !  Print stress tensor
+        write(line,'(a)') ""
+        if (iprt == 0) then
+          call to_screen(trim(line))
+        else
+          write(iprt,*)trim(line)
+        end if
+        write(line,'(a)') "          Stress tensor in GPa using Voigt notation (xx, yy, zz, yz, xz, xy):"
+        if (iprt == 0) then
+          call to_screen(trim(line))
+        else
+          write(iprt,*)trim(line)
+        end if
+        write(line,'(10x,6f10.3)') (voigt(i),i=1,6)
+        if (iprt == 0) then
+          call to_screen(trim(line))
+        else
+          write(iprt,*)trim(line)
+        end if
+      end if
+    end if
+end subroutine write_pressure
+subroutine setup_nhco(ii)
   USE molmec_C, only : nnhco, nhco, htype
   USE molkst_C, only : numat,  method_am1, method_pm3, method_mndo, method_pm6, method_PM7, method_rm1, &
    keywrd
@@ -1423,4 +1564,4 @@ subroutine write_unit_cell_HOF(iprt)
         end do
       end do
   end do l230
-    end subroutine setup_nhco
+end subroutine setup_nhco

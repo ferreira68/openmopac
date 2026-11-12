@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine inid
 !-----------------------------------------------
@@ -256,6 +255,7 @@
 #if MOPAC_F2003
       USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -300,6 +300,7 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
       implicit none
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
@@ -461,6 +462,7 @@
 !
 !***********************************************************************
 !***********************************************************************
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -855,6 +857,7 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1007,6 +1010,7 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1094,14 +1098,14 @@
       end function rijkl
 
 
-      subroutine rotatd(ni, nj, ci, cj, w, kr, enuc)
+      subroutine rotatd(ni, nj, ci, cj, w, kr, enuc, sp, pp, sd, dp, d_d, cored)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use funcon_C, only : a0, ev
-      use mndod_C, only : indx, indexd, sp, sd, pp, dp, d_d, cored, inddd
+      use mndod_C, only : indx, indexd, inddd
       use parameters_C, only : natorb, iod, tore
-      use molkst_C, only : numcal, l_feather, method_PM7
+      use molkst_C, only : l_feather, method_PM7
 !     *
 !     CALCULATION OF TWO-CENTER TWO-ELECTRON INTEGRALS
 !     IN THE MOLECULAR COODINATE SYSTEM BY 2.d0-STEP PROCEDURE
@@ -1110,6 +1114,8 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+      !$acc routine seq
+      !$acc routine(ccrep) seq
       implicit none
       integer, intent(in) :: ni, nj
 !-----------------------------------------------
@@ -1124,12 +1130,16 @@
       double precision, dimension(*)  :: w
       double precision  :: enuc
       double precision, dimension(171) :: en
+! Per-pair scratch owned by the caller (rotate), formerly module globals in mndod_C, so that atom
+! pairs can be evaluated independently (threads, GPU).
+      double precision, intent(inout) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
+      double precision, intent(inout) :: cored(10,2)
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
       integer , dimension(45) :: met
       integer :: limkl, kl, ii, kk, limij, istep, i, i1, j1, ij, jj, mm, k, l, &
-        iw, iminus, j, ij1, jw, icalcn = 0, li, lj
+        iw, iminus, j, ij1, jw, li, lj
       double precision, dimension(45,45) :: v
       double precision, dimension(22) :: ri
       double precision, dimension(491) :: rep
@@ -1141,11 +1151,8 @@
       data met/ 1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, &
         4, 5, 5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 5*6/
 !
-      if (icalcn /= numcal) then
-        icalcn = numcal
-      end if
 !
-      call rotmat (nj, ni, ci, cj, r)
+      call rotmat (nj, ni, ci, cj, r, sp, pp, sd, dp, d_d)
 !
       call reppd (ni, nj, r, ri, gab) ! Work out the 22 s-p terms
       rij = r
@@ -1191,7 +1198,7 @@
         istep = limkl*limij
         ww(:istep) = 0.0D0
   !
-        call tx (ii, kk, rep, logv, v)
+        call tx (ii, kk, rep, logv, v, sp, sd, pp, dp, d_d)
   !
         do i1 = 1, ii
           do j1 = 1, i1
@@ -1209,35 +1216,35 @@
   !
                 select case (mm)
                 case (1)
-                  iw = indw(1,1)
+                  iw = ((indx(1,1)-1)*limkl + kl)
                   ww(iw) = wrepp
                 case (2)
                   do i = 1, 3
-                    iw = indw(i + 1,1)
+                    iw = ((indx(i + 1,1)-1)*limkl + kl)
                     ww(iw) = ww(iw) + sp(i1-1,i)*wrepp
                   end do
                 case (3)
                   do i = 1, 3
                     cc = pp(i,i1-1,j1-1)
-                    iw = indw(i + 1,i + 1)
+                    iw = ((indx(i + 1,i + 1)-1)*limkl + kl)
                     ww(iw) = ww(iw) + cc*wrepp
                     iminus = i - 1
                     if (iminus == 0) cycle
                     do j = 1, iminus
                       cc = pp(1+i+j,i1-1,j1-1)
-                      iw = indw(i + 1,j + 1)
+                      iw = ((indx(i + 1,j + 1)-1)*limkl + kl)
                       ww(iw) = ww(iw) + cc*wrepp
                     end do
                   end do
                 case (4)
                   do i = 1, 5
-                    iw = indw(i + 4,1)
+                    iw = ((indx(i + 4,1)-1)*limkl + kl)
                     ww(iw) = ww(iw) + sd(i1-4,i)*wrepp
                   end do
                 case (5)
                   do i = 1, 5
                     do j = 1, 3
-                      iw = indw(i + 4,j + 1)
+                      iw = ((indx(i + 4,j + 1)-1)*limkl + kl)
                       ij1 = 3*(i - 1) + j
                       ww(iw) = ww(iw) + dp(ij1,i1-4,j1-1)*wrepp
                     end do
@@ -1245,14 +1252,14 @@
                 case (6)
                   do i = 1, 5
                     cc = d_d(i,i1-4,j1-4)
-                    iw = indw(i + 4,i + 4)
+                    iw = ((indx(i + 4,i + 4)-1)*limkl + kl)
                     ww(iw) = ww(iw) + cc*wrepp
                     iminus = i - 1
                     if (iminus == 0) cycle
                     do j = 1, iminus
                       ij1 = inddd(i,j)
                       cc = d_d(ij1,i1-4,j1-4)
-                      iw = indw(i + 4,j + 4)
+                      iw = ((indx(i + 4,j + 4)-1)*limkl + kl)
                       ww(iw) = ww(iw) + cc*wrepp
                     end do
                   end do
@@ -1364,31 +1371,22 @@
       en(:) = 0.d0
       li = natorb(ni)
       lj = natorb(nj)
-      call elenuc (1, li, li + 1, li + lj, en)
+      call elenuc (1, li, li + 1, li + lj, en, sp, sd, pp, dp, d_d, cored)
 ! *** CORE-CORE REPULSIONS FOR MNDO.
       call ccrep (ni, nj, r, enuc, gab)
       return
-      contains
-
-
-      integer function indw (i, j)
-      integer, intent(in) :: i
-      integer, intent(in) :: j
-      indw = (indx(i,j)-1)*limkl + kl
-      return
-      end function indw
       end subroutine rotatd
 
 
-      subroutine rotmat(nj, ni, coordi, coordj, r)
+      subroutine rotmat(nj, ni, coordi, coordj, r, sp, pp, sd, dp, d_d)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use parameters_C, only : dorbs
-      use mndod_C, only : sp, pp, sd, dp, d_d
 !     *
 !     ROTATION MATRIX FOR A GIVEN ATOM PAIR I-J (I.GT.J).
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1398,6 +1396,7 @@
       double precision , intent(out) :: r
       double precision , intent(in) :: coordi(3)
       double precision , intent(in) :: coordj(3)
+      double precision, intent(inout) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
 !-----------------------------------------------
 !   L o c a l   P a r a m e t e r s
 !-----------------------------------------------
@@ -1687,6 +1686,7 @@
 !-----------------------------------------------
       use parameters_C, only : tore, po, ddp
       use funcon_C, only : ev
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1868,15 +1868,16 @@
       end subroutine eiscor
 
 
-      subroutine tx(ii, kk, rep, logv, v)
+      subroutine tx(ii, kk, rep, logv, v, sp, sd, pp, dp, d_d)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
-      use mndod_C, only : indexd, indx, ind2, sp, sd, pp, dp, d_d
+      use mndod_C, only : indexd, indx, ind2
 !     *
 !     ROTATION OF TWO-ELECTRON TWO-CENTER INTEGRALS IN SPD BASIS
 !     FIRST STEP
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -1886,6 +1887,7 @@
       double precision , intent(in) :: rep(491)
       double precision , intent(out) :: v(45,45)
       logical , intent(out) :: logv(45,45)
+      double precision, intent(in) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
@@ -1997,6 +1999,7 @@
 !     *
 !     STORE TWO-CENTER TWO-ELECTRON INTEGRALS IN A SQUARE MATRIX.
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -2172,6 +2175,7 @@ end subroutine wstore
 !     DB     CHARGE SEPARATION OF CONFIGURATION 2.
 !     ADD    ADDITIVE TERM
 !     *
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -2365,17 +2369,18 @@ end subroutine wstore
 
 
 
-      subroutine elenuc(ia, ib, ja, jb, h)
+      subroutine elenuc(ia, ib, ja, jb, h, sp, sd, pp, dp, d_d, cored)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use molkst_C, only : mpack
-      use mndod_C, only : sp, sd, pp, dp, d_d, cored, inddd, inddp, indpp
+      use mndod_C, only : inddd, inddp, indpp
 !***********************************************************************
 !
 !   ELENUC - Nuclear stabilization terms added to one-electron matrix
 !
 !***********************************************************************
+      !$acc routine seq
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -2384,7 +2389,9 @@ end subroutine wstore
       integer , intent(in) :: ib
       integer , intent(in) :: ja
       integer , intent(in) :: jb
-      double precision , intent(inout) :: h(mpack)
+      double precision , intent(inout) :: h(*)   ! en(171) from rotate/rotatd
+      double precision, intent(in) :: sp(3,3), sd(5,5), pp(6,3,3), dp(15,5,3), d_d(15,5,5)
+      double precision, intent(in) :: cored(10,2)
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
@@ -3463,6 +3470,7 @@ end subroutine wstore
       subroutine to_point(r, point, const)
         use molkst_C, only : trunc_1, trunc_2
         use funcon_C, only : ev, a0
+        !$acc routine seq
         double precision, intent(in) :: r
         double precision, intent(out) :: point, const
 !

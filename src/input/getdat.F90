@@ -1,25 +1,24 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine getdat(input, output)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
       use molkst_C, only : natoms, jobnam, run, backslash, &
-      line, ncomments, is_PARAM, keywrd, arc_hof_1, arc_hof_2, gui
+      line, ncomments, is_PARAM, keywrd, arc_hof_1, arc_hof_2
       use chanel_C, only : job_fn, input_fn, iw0, iw
       use common_arrays_C, only : all_comments
 !-----------------------------------------------
@@ -33,7 +32,7 @@
 !-----------------------------------------------
       integer, parameter :: from_data_set = 7
       integer :: i, j, io_stat, l, nlines
-      logical :: exists, arc_file, comments = .true.
+      logical :: exists, arc_file, comments = .true., double_plus
       character :: line1*3000, num1*1, num2*1
       character, allocatable :: tmp_comments(:)*120
       double precision, external :: reada
@@ -48,57 +47,53 @@
 !********************************************************************
       natoms = 0
       call to_screen("To_file: getdat")
-      if (gui) then
-        jobnam = "MOPAC input"
-        natoms = 1
+      if (run /= 2 .or.jobnam ==" ") then
+#ifdef MOPAC_F2003
+        i = command_argument_count()
+#else
+        i = command_argument_count()
+#endif
+        if (i >= run) then
+#ifdef MOPAC_F2003
+          call get_command_argument (run, jobnam)
+#else
+          call getarg (run, jobnam)
+#endif
+          natoms = 1
+        else if (i == 0) then
+          if (is_PARAM) then
+            write(line,'(2a)')" PARAM is the parameter optimization program for use with MOPAC"
+            write(0,'(/10x,a,/)')trim(line)
+            write(0,'(10x,a)')" It uses a single argument, the PARAM data-set"
+            write(0,'(10x,a)')" The command to run PARAM is 'mopac-param <data-set>.dat'"
+            ! call web_message(0,"running_MOPAC.html")
+            write(0,'(10x,a)')" Press (return) to continue"
+            read(5,*, iostat=i)
+            return
+          else
+            write(0,'(/10x,a,/)')" MOPAC is a semiempirical quantum chemistry program"
+            write(0,'(10x,a)')" It uses a single argument, the MOPAC data-set"
+            write(0,'(10x,a)')" The command to run MOPAC is 'mopac <data-set>.mop'"
+            call web_message(0,"running_MOPAC.html")
+            write(0,'(10x,a)')" Press (return) to continue"
+            read(5,*, iostat=i)
+            return
+          end if
+        end if
       else
-        if (run /= 2 .or.jobnam ==" ") then
-#ifdef MOPAC_F2003
-          i = command_argument_count()
-#else
-          i = iargc()
-#endif
-          if (i >= run) then
-#ifdef MOPAC_F2003
-            call get_command_argument (run, jobnam)
-#else
-            call getarg (run, jobnam)
-#endif
-            natoms = 1
-            do i = len_trim(jobnam), 1, -1   !  Remove any unprintable characters from the end of the file-name
-              if (ichar(jobnam(i:i)) > 39 .and. ichar(jobnam(i:i)) < 126 .or. jobnam(i:i) =="'") exit
-            end do
-            jobnam(i + 1:) = " "
+        natoms = 1
+      end if
+!  Remove any unprintable characters from the end of the file-name
+      do i = len_trim(jobnam), 1, -1
+        if (ichar(jobnam(i:i)) > 39 .and. ichar(jobnam(i:i)) < 126 .or. jobnam(i:i) =="'") exit
+      end do
+      jobnam(i + 1:) = " "
 !
 !  Replace backslash with forward-slash
 !
-            do i = 1, len_trim(jobnam)
-              if (jobnam(i:i) == backslash) jobnam(i:i) = "/"
-            end do
-          else if (i == 0) then
-            if (is_PARAM) then
-              write(line,'(2a)')" PARAM is the parameter optimization program for use with MOPAC"
-              write(0,'(/10x,a,/)')trim(line)
-              write(0,'(10x,a)')" It uses a single argument, the PARAM data-set"
-              write(0,'(10x,a)')" The command to run PARAM is 'mopac-param <data-set>.dat'"
-             ! call web_message(0,"running_MOPAC.html")
-              write(0,'(10x,a)')" Press (return) to continue"
-              read(5,*, iostat=i)
-              return
-            else
-              write(0,'(/10x,a,/)')" MOPAC is a semiempirical quantum chemistry program"
-              write(0,'(10x,a)')" It uses a single argument, the MOPAC data-set"
-              write(0,'(10x,a)')" The command to run MOPAC is 'mopac <data-set>.mop'"
-              call web_message(0,"running_MOPAC.html")
-              write(0,'(10x,a)')" Press (return) to continue"
-              read(5,*, iostat=i)
-              return
-            end if
-          end if
-        else
-          natoms = 1
-        end if
-      end if
+      do i = 1, len_trim(jobnam)
+        if (jobnam(i:i) == backslash) jobnam(i:i) = "/"
+      end do
       if (natoms == 0) return
 !
 ! Check for the data set in the order: <file>.mop, <file>.dat, <file>
@@ -129,8 +124,7 @@
         line = trim(jobnam)
         inquire(file=line, exist=exists)
         if (exists) then ! Check that it is not a folder
-          open(unit=from_data_set, file=line, status='OLD', position=&
-          'asis', iostat=io_stat)
+          open(unit=from_data_set, file=line, status='OLD', iostat=io_stat)
           if (io_stat == 9) then
             exists = .false.
           else
@@ -154,7 +148,7 @@
            if (i > 120)  call to_screen(line(121:min(i,240)))
          end if
          job_fn = line(:len(job_fn))
-        open(unit=from_data_set, file=job_fn, status='OLD', position='asis', iostat=io_stat)
+        open(unit=from_data_set, file=job_fn, status='OLD', iostat=io_stat)
         if (io_stat /= 0) then
           write(line,'(2a)')" Data file: '"//trim(job_fn)//"' exists, but it cannot be opened."
           write(0,'(//10x,a,//)')trim(line)
@@ -255,7 +249,7 @@
           if (io_stat /= 0) then
             write (line, '(a)') ' The run-time temporary file "'//trim(jobnam)//'.temp" cannot be written to.'
             open(unit=iw, file=trim(jobnam)//'.out')
-            if( .not. gui) write(0,"(///10x,a)")line
+            write(0,"(///10x,a)")line
             call to_screen(line)
             call mopend (trim(line))
             return
@@ -295,6 +289,7 @@
       if (i /= 0) keywrd(i:i+6) = "GEO_DAT"
       i = index(keywrd, "GEO-REF")
       if (i /= 0) keywrd(i:i+6) = "GEO_REF"
+      double_plus = (index(keywrd, " ++ ") /= 0)
       if (index(keywrd, " GEO_DAT") + index(keywrd, " SETUP")/= 0) then
         nlines = nlines + 3
       else if (.not. is_PARAM .and. nlines < 4) then
@@ -382,7 +377,7 @@
       line = ' '
       write (input, '(A241)') line
       rewind input
-1000  if (nlines < 3 .and. .not. is_PARAM) then
+1000  if (nlines < 3 .and. .not. is_PARAM .and. line1 == " " .and. .not. double_plus) then
         inquire(unit=output, opened=exists)
         if (.not. exists) open(unit=output, file=trim(jobnam)//'.out')
 #ifdef MOPAC_F2003

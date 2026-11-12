@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
     subroutine lbfgs (xparam, escf)
 !
@@ -24,7 +23,7 @@
 !    Mathematical Programming B, 45, 3, pp. 503-528.
 !
       use molkst_C, only: tleft, time0, iflepo, tdump, gnorm, natoms, keywrd, stress, &
-      moperr, nvar, id, line, last, mozyme, numat, prt_gradients, keywrd_txt,  prt_coords
+      moperr, nvar, id, line, last, mozyme, numat, prt_gradients, keywrd_txt,  prt_coords, use_disk
 !
       use chanel_C, only: iw0, iw, log, ilog, input_fn
 !
@@ -88,7 +87,7 @@
       if (Index (keywrd, " CYCLES") /= 0) then
         maxcyc = Nint (reada (keywrd, Index (keywrd, " CYCLES")))
       end if
-      if (index(keywrd, " LET") + index(keywrd, " PREC") /= 0) then
+      if (index(keywrd, " LET") + index(keywrd, " PRECISE") /= 0) then
         if (index(keywrd, " LET(") /= 0) then
           max_bad = Nint (reada (keywrd, Index (keywrd, " LET(")))
           write(iw,'(/10x,a,i4)') &
@@ -108,7 +107,7 @@
       else
         tolerg = 1.d0
         if (id /= 0) tolerg = id*2.d0 - 1.d0
-        if (Index (keywrd, " PREC") /= 0) then
+        if (Index (keywrd, " PRECISE") /= 0) then
           tolerg = tolerg*0.2d0
         end if
       end if
@@ -299,8 +298,10 @@
              tprt, txt, Min (gnorm, 999999.999d0), escf, trim(line1)
             write(iw,"(a)")trim(line)
             call to_screen(trim(line))
-            endfile (iw)
-            backspace (iw)
+            if (use_disk) then
+              endfile (iw)
+              backspace (iw)
+            end if
             if (log) write (ilog, '(a)', err = 1000)trim(line)
             resfil = .false.
           else
@@ -309,8 +310,10 @@
                    nstep, Min (tstep, 9999.99d0), tprt, txt, &
                    & Min (gnorm, 999999.999d0), escf, trim(line1)
             write(iw,"(a)")trim(line)
-            endfile (iw)
-            backspace (iw)
+            if (use_disk) then
+              endfile (iw)
+              backspace (iw)
+            end if
             if (log) write (ilog, "(a)")trim(line)
             call to_screen(trim(line))
           end if
@@ -321,7 +324,7 @@
             call to_screen(line(:i))
           end if
           if (nflush /= 0) then
-            if (Mod(nstep, nflush) == 0) then
+            if (Mod(nstep, nflush) == 0 .and. use_disk) then
               endfile (iw)
               backspace (iw)
               if (log) then
@@ -336,8 +339,10 @@
           !  with the old gradient.  Ideally, this should be small.
           !
   1000    call dcopy (nvar, grad, 1, gold, 1)
-          endfile (iw)
-          backspace (iw)
+          if (use_disk) then
+            endfile (iw)
+            backspace (iw)
+          end if
           !
           !  EXIT CRITERIA.  (The criteria in SETULB are ignored.)
           if (gnorm < tolerg) then
@@ -399,7 +404,7 @@
         else
           write (iw, "(//10X,'CURRENT VALUE OF HEAT OF FORMATION ='   ,F14.6)") escf - stress
         end if
-        if (prt_gradients .and. index(keywrd," GRADI") /= 0 .and. mozyme) then
+        if (prt_gradients .and. index(keywrd," GRAD") /= 0 .and. mozyme) then
           write (iw, '(3/7X,''CURRENT  POINT  AND  DERIVATIVES'',/)')
           call prtgra ()
         end if
@@ -411,7 +416,7 @@
     end subroutine lbfgs
     subroutine lbfsav (tt0, mode, wa, nwa, iwa, niwa, task, csave, lsave, isave, &
    & dsave, nstep, escf)
-      use molkst_C, only: nscf, numat, norbs, nvar
+      use molkst_C, only: nscf, numat, norbs, nvar, use_disk
       use chanel_C, only: ires, iw, restart_fn
       use common_arrays_C, only: xparam, grad
       implicit none
@@ -426,11 +431,12 @@
       double precision, dimension (nwa), intent (inout) :: wa
       logical :: opend
       integer :: old_numat, old_norbs, i, j
+      if (.not. use_disk) return
       inquire (unit=ires, opened=opend)
       if (opend) then
         close (unit=ires, status="KEEP")
       end if
-      open (unit=ires, file=restart_fn, status="UNKNOWN", form="UNFORMATTED")
+      open (unit=ires, file=restart_fn, form="UNFORMATTED")
       rewind (ires)
       if (mode == 1) then
         call den_in_out (1)

@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
   subroutine to_screen(text0)
   use chanel_C, only : iw0
@@ -61,9 +60,9 @@
 !
   use molkst_C, only : numat, norbs, escf, nelecs, nclose, nopen, verson, &
   method_am1, method_mndo, method_pm3, method_rm1, method_mndod, method_pm6, &
-  method_pm7, nvar, koment, keywrd, zpe, id, density, natoms, formula, press, &
+  method_pm7, nvar, koment, keywrd, zpe, id, density, natoms, formula, press, voigt, &
   uhf, nalpha, nbeta,  gnorm, mozyme, mol_weight, ilim, &
-  line, nscf, time0, sz, ss2, no_pKa, title, jobnam, job_no, fract
+  line, nscf, time0, sz, ss2, no_pKa, title, jobnam, job_no, job_no0, fract
 !
   use MOZYME_C, only : ncf, ncocc, noccupied, icocc_dim, cocc_dim, nvirtual, icvir_dim, &
   nncf, iorbs, cocc, icocc, ncvir, nnce, nce, icvir, cvir, tyres, size_mres, &
@@ -88,6 +87,7 @@
   USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
 !
+      use, intrinsic :: ieee_arithmetic, only : isnan => ieee_is_nan   ! standard replacement for the GNU isnan extension
   implicit none
   character (len=*) :: text
 
@@ -361,7 +361,7 @@
 !
     if (abs(escf) > 1.d-30) then
       write(opt_hook,"(a,sp, d"//fmt13p6//",a)")" HEAT_OF_FORM_UPDATED:KCAL/MOL=",escf
-      write(opt_hook,"(a,sp, d"//fmt13p6//",a)")" GRADIENT_UPDATED:KCAL/MOL/ANG=",gnorm
+      write(opt_hook,"(a,sp, d"//fmt13p6//",a)")" GRADIENT_NORM_UPDATED:KCAL/MOL/ANG=",gnorm
 
       write(opt_hook,"(a,i"//paras//",a)")" ATOM_X_UPDATED:ANGSTROMS[",3*numat, "]="
       write(opt_hook,"(3f"//fmt10p4//")") ((coord(j,i),j=1,3), i=1,numat)
@@ -369,6 +369,29 @@
         write(opt_hook,"(a,i1,a)")" TRANS_VECTS_UPDATED:ANGSTROMS[",id*3,"]="
         write(opt_hook,"(3f"//fmt9p4//")")((tvec(j,i),j=1,3),i=1,id)
         if (density > 1.d-1) write(opt_hook,"(a,d"//fmt13p6//",a)")" DENSITY:G/CM^3=",density
+      end if
+      if (id == 3 .and. nvar == 3*natoms) then
+        sum = 0.d0
+        do i = 1, 6
+          if (abs(voigt(i)) > sum) sum = abs(voigt(i))
+        end do
+        if (sum /= 0.d0) then
+          write(hook,"(a,i1,a)")" VOIGT_STRESS_UPDATED:GIGAPASCALS[6]="
+          write(hook,"(6f"//fmt13p5//")")(voigt(i),i=1,6)
+        end if
+      end if
+      if (nvar > 0) then
+        sum = 0.d0
+        do i = 1, nvar
+          if (abs(grad(i)) > sum) sum = abs(grad(i))
+        end do
+        if (sum /= 0.d0) then
+          write(hook,"(a,i"//paras//",a)")" GRADIENTS_UPDATED:KCAL/MOL/ANGSTROM[",nvar, "]="
+          read(fmt9p4,'(3x,i2)')i
+          j = max(int(log10(sum)),1)
+          write(fmtnnp4,"(i2.2,'.',i2.2)")4 + j + i, i
+          write(hook,"(10f"//fmtnnp4//")") (grad(i), i=1,nvar)
+        end if
       end if
     end if
     if (opt_hook == 0) call flush (0)
@@ -404,6 +427,34 @@
     end if
     write(opt_hook,"(a,i"//paras//",a)")" ATOM_X_UPDATED:ANGSTROMS[",3*numat, "]="
     write(opt_hook,"(3f"//fmt10p4//")") ((coord(j,i),j=1,3), i=1,numat)
+    if (id > 0) then
+      write(opt_hook,"(a,i1,a)")" TRANS_VECTS_UPDATED:ANGSTROMS[",id*3,"]="
+      write(opt_hook,"(3f"//fmt9p4//")")((tvec(j,i),j=1,3),i=1,id)
+      if (density > 1.d-1) write(opt_hook,"(a,d"//fmt13p6//",a)")" DENSITY:G/CM^3=",density
+    end if
+    if (id == 3 .and. nvar == 3*natoms) then
+      sum = 0.d0
+      do i = 1, 6
+        if (abs(voigt(i)) > sum) sum = abs(voigt(i))
+      end do
+      if (sum /= 0.d0) then
+        write(hook,"(a,i1,a)")" VOIGT_STRESS_UPDATED:GIGAPASCALS[6]="
+        write(hook,"(6f"//fmt13p5//")")(voigt(i),i=1,6)
+      end if
+    end if
+    if (nvar > 0) then
+      sum = 0.d0
+      do i = 1, nvar
+        if (abs(grad(i)) > sum) sum = abs(grad(i))
+      end do
+      if (sum /= 0.d0) then
+        write(hook,"(a,i"//paras//",a)")" GRADIENTS_UPDATED:KCAL/MOL/ANGSTROM[",nvar, "]="
+        read(fmt9p4,'(3x,i2)')i
+        j = max(int(log10(sum)),1)
+        write(fmtnnp4,"(i2.2,'.',i2.2)")4 + j + i, i
+        write(hook,"(10f"//fmtnnp4//")") (grad(i), i=1,nvar)
+      end if
+    end if
     if (L_MO_s) &
     call print_conventional_M_O_s(opt_hook, compressed, moa_lower, moa_upper, mob_lower, mob_upper, fmt9p4, orbs2)
     if (L_MO_s) &
@@ -435,6 +486,16 @@
       if (Abs(press(1)) > 1.d-20) then
         write(hook,"(a,i1,a)")" RESTRAINING_PRESSURE:GIGAPASCALS[3]="
         write(hook,"(3f"//fmt13p5//")")(press(i),i=1,3)
+      end if
+    end if
+    if (id == 3 .and. nvar == 3*natoms) then
+      sum = 0.d0
+      do i = 1, 6
+        if (abs(voigt(i)) > sum) sum = abs(voigt(i))
+      end do
+      if (sum /= 0.d0) then
+        write(hook,"(a,i1,a)")" VOIGT_STRESS:GIGAPASCALS[6]="
+        write(hook,"(6f"//fmt13p5//")")(voigt(i),i=1,6)
       end if
     end if
 #ifdef MOPAC_F2003
@@ -509,7 +570,7 @@
       do i = 1, nvar
         if (abs(grad(i)) > sum) sum = abs(grad(i))
       end do
-      if (sum > 1.d-4) then
+      if (sum /= 0.d0) then
         write(hook,"(a,i"//paras//",a)")" GRADIENTS:KCAL/MOL/ANGSTROM[",nvar, "]="
         read(fmt9p4,'(3x,i2)')i
         j = max(int(log10(sum)),1)
@@ -1120,6 +1181,34 @@
     write(hook,"(a,sp, d"//fmt13p6//",a)")" HEAT_OF_FORMATION:KCAL/MOL=",escf
     write(hook,"(a,i"//paras//",a)")" ATOM_X_OPT:ANGSTROMS[",3*numat, "]="
     write(hook,"(3f"//fmt10p4//")") ((coord(j,i),j=1,3), i=1,numat)
+    if (id > 0) then
+      write(opt_hook,"(a,i1,a)")" TRANS_VECTS_UPDATED:ANGSTROMS[",id*3,"]="
+      write(opt_hook,"(3f"//fmt9p4//")")((tvec(j,i),j=1,3),i=1,id)
+      if (density > 1.d-1) write(opt_hook,"(a,d"//fmt13p6//",a)")" DENSITY:G/CM^3=",density
+    end if
+    if (id == 3 .and. nvar == 3*natoms) then
+      sum = 0.d0
+      do i = 1, 6
+        if (abs(voigt(i)) > sum) sum = abs(voigt(i))
+      end do
+      if (sum /= 0.d0) then
+        write(hook,"(a,i1,a)")" VOIGT_STRESS_UPDATED:GIGAPASCALS[6]="
+        write(hook,"(6f"//fmt13p5//")")(voigt(i),i=1,6)
+      end if
+    end if
+    if (nvar > 0) then
+      sum = 0.d0
+      do i = 1, nvar
+        if (abs(grad(i)) > sum) sum = abs(grad(i))
+      end do
+      if (sum /= 0.d0) then
+        write(hook,"(a,i"//paras//",a)")" GRADIENTS_UPDATED:KCAL/MOL/ANGSTROM[",nvar, "]="
+        read(fmt9p4,'(3x,i2)')i
+        j = max(int(log10(sum)),1)
+        write(fmtnnp4,"(i2.2,'.',i2.2)")4 + j + i, i
+        write(hook,"(10f"//fmtnnp4//")") (grad(i), i=1,nvar)
+      end if
+    end if
     if (index(keywrd, " BOND") /= 0)  &
       call write_screen_bonds(compressed, orbs2, hook, fmt9p4)
   else if (mullik) then
@@ -1251,7 +1340,7 @@
 !
 !  Don't print processor-independent CPU times for quick jobs - that would waste too much time.
 !
-    if (time0 > 1.d0 .and. job_no < 4) then
+    if (time0 > 1.d0 .and. job_no < 4+job_no0) then
 !
 !  Deliberately run a time-consuming calculation to work out CPU speed
 !  The "j" index is set to use up 1.0 seconds on the development computer.

@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine fock2z (f, q, qe, wj, wk, ptot2, mode, ione)
     use molkst_C, only: numat, mpack
@@ -679,6 +678,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !      & qdenet, qscnet, gden, qscat
 
      use linear_cosmo, only: addfckz
+    use acc_mozyme_C, only : fd_ok, pd_ok, allow_sdgpu, allow_ddgpu, n_sdpairs, n_ddpairs, acc_pair_on_gpu, acc_path_note
 
     implicit none
    !***********************************************************************
@@ -712,6 +712,12 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     double precision, dimension (45) :: e1b, e2a
     double precision, dimension (171) :: fdummy = 0.d0
     double precision, dimension (2025) :: wjloc = 0.d0
+    integer :: acc_mode, pass, npass, filter
+    logical :: p_on_device, acc_ok, cpu_pairs, cpu_pair
+    integer(8) :: c0, c1, crate
+    double precision :: tg
+    double precision, allocatable :: fg(:)
+    integer, external :: acc_fock_mode
    !
     dx = 0.d0
     dy = 0.d0
@@ -776,6 +782,69 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
         end do
       end do
     end do
+   !   GPU (OpenACC) two-center terms, MOPAC_ACC_FOCK set: every atom pair on the device (acc_fz2n,
+   !   called at the end, after the one-center and COSMO terms, so that the device copy of F is
+   !   complete); the pair loop below is then skipped (npass = 0), or, if the device-memory plan
+   !   keeps some NDDO pairs with d orbitals on the CPU (allow_sdgpu, allow_ddgpu; acc_pair_on_gpu),
+   !   computes those only (filter = 1, acc_fz2n_cpu_dpairs, OpenMP; 2 = all other pairs, in the loop
+   !   below; 0 = all, in the loop below). MOPAC_ACC_FOCK=test: the GPU
+   !   terms go into a copy of F, the CPU loop computes all pairs into F (in two passes if some pairs
+   !   are on the CPU, the copy being taken after the first), and the two are compared.
+    p_on_device = pd_ok        ! set by the GPU density build if the device copy of P is current
+    fd_ok = .false.
+    pd_ok = .false.
+    acc_mode = 0
+    if (mode == 0 .and. direct .and. semidr .and. ione == 1) then
+      acc_mode = acc_fock_mode()
+    else if (acc_fock_mode() /= 0) then
+      if (ione /= 1) then
+        call acc_path_note('Fock build (periodic system)')
+      else if (.not. (direct .and. semidr)) then
+        call acc_path_note('Fock build (NODIRECT or SEMIDIRECT)')
+      else
+        call acc_path_note('Fock build (partial updates: only some atoms move)')
+      end if
+    end if
+    npass = 1
+    filter = 0
+    tg = 0.d0
+    if (acc_mode /= 0) then
+      call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .false., .false., .true., acc_ok)
+      if (.not. acc_ok) acc_mode = 0
+    end if
+    cpu_pairs = (n_sdpairs > 0 .and. .not. allow_sdgpu) .or. (n_ddpairs > 0 .and. .not. allow_ddgpu)
+    if (acc_mode == 1) then
+      npass = 0
+      if (cpu_pairs) then
+        npass = 1
+        filter = 1
+      end if
+    else if (acc_mode == 2) then
+      allocate (fg(mpack))
+      if (cpu_pairs) then
+        npass = 2
+        filter = 1
+      else
+        fg(1:mpack) = f(1:mpack)
+        call system_clock (c0, crate)
+        call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false., .false., .false., acc_ok)
+        call system_clock (c1)
+        tg = dble(c1 - c0)/dble(crate)
+      end if
+    end if
+    do pass = 1, npass
+    if (pass == 2) then
+      fg(1:mpack) = f(1:mpack)
+      call system_clock (c0, crate)
+      call acc_fz2n (fg, ptot, qe, iorbs, nat, coord, .false., .false., .false., acc_ok)
+      call system_clock (c1)
+      tg = dble(c1 - c0)/dble(crate)
+      filter = 2
+    end if
+    if (filter == 1) then
+      call acc_fz2n_cpu_dpairs (f, ptot, iorbs, nat, coord)   ! the pairs kept on the CPU, OpenMP
+      cycle
+    end if
     kr = 0
     ired = 1
     do ii = 1, numat
@@ -799,6 +868,13 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
               jred = jred + 1
             end if
             jba = iorbs(jj)
+            if (filter /= 0) then
+              cpu_pair = .false.
+              if (iab > 5 .or. jba > 5) then
+                if (nijbo(ii, jj) >= 0) cpu_pair = .not. acc_pair_on_gpu(nat(ii), iab, nat(jj), jba)
+              end if
+              if (cpu_pair .neqv. (filter == 1)) cycle
+            end if
             if (nijbo(ii, jj) >= 0) then
               if (direct .and. (calci .or. calcj)) then
                 call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), wjloc, kr, e1b, e2a, enuc)
@@ -1275,6 +1351,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
           end if
         end if
     end do
+    end do
+    if (acc_mode == 2) then
+      call acc_fock_compare (f, fg, tg)
+      deallocate (fg)
+    end if
     if (direct) then
       kr = 0
       ired = 1
@@ -1291,6 +1372,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     if (mode == -1) f = -f
    ! The following routine adds the dielectric correction to F.
     if (useps .and. mode == 0) call addfckz()
+    if (acc_mode == 1) call acc_fz2n (f, ptot, qe, iorbs, nat, coord, .true., p_on_device, .false., acc_ok)
 end subroutine fz2n
 subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
      & diagonal, kr)

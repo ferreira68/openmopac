@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
 subroutine buildf (f, partf, mode)
     use molkst_C, only: numat, mpack, id
@@ -21,7 +20,7 @@ subroutine buildf (f, partf, mode)
     integer, intent (in) :: mode
     double precision, dimension (mpack), intent (in) :: partf
     double precision, dimension (mpack), intent (inout) :: f
-    integer :: alloc_stat
+    integer :: alloc_stat, i
     double precision, dimension(:), allocatable :: q, qe
     double precision, dimension(:,:), allocatable :: ptot2
    !
@@ -34,9 +33,15 @@ subroutine buildf (f, partf, mode)
        call memory_error ("buildf")
        goto 100
     end if
-    if (mode ==-1) f(:mpack) = partf(:mpack) - h(:mpack)
-    if (mode == 0) f(:mpack) =                 h(:mpack)
-    if (mode == 1) f(:mpack) = partf(:mpack) + h(:mpack)
+    ! Elementwise, so the OpenMP split does not change any value (mpack can be 10**8: one thread
+    ! copying F = H takes tens of milliseconds per SCF iteration).
+!$omp parallel do schedule(static) default(shared) private(i)
+    do i = 1, mpack
+      if (mode == -1) f(i) = partf(i) - h(i)
+      if (mode ==  0) f(i) = h(i)
+      if (mode ==  1) f(i) = partf(i) + h(i)
+    end do
+!$omp end parallel do
     if (id == 0) then
       !
       !  Discrete system

@@ -1,25 +1,27 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
-  subroutine run_mopac
+  subroutine run_mopac() bind(c)
+#ifdef WIN32
   !dec$ attributes dllexport :: run_mopac
+#endif
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
 !
+      use mopac_magma, only : magma_setup
       use common_arrays_C, only : nfirst, nlast, nat, xparam, grad, nw, &
       p, pa, pb, labels, loc, time_start, l_atom, coord, txtatm, coorda, &
       txtatm1, cell_ijk, eigs, c, breaks
@@ -27,11 +29,12 @@
       USE molkst_C, only : gnorm, natoms, numat, nvar, numcal, job_no, nscf, id, &
         escf, iflepo, iscf, keywrd, last, moperr, maxatoms, ncomments, &
         time0, atheat, errtxt, isok, mpack, line, na1, refkey, keywrd_txt, &
-        press, mozyme, step_num, jobnam, nelecs, stress, E_disp, E_hb, E_hh, no_pKa, &
+        press, voigt, mozyme, step_num, jobnam, nelecs, stress, E_disp, E_hb, E_hh, no_pKa, &
         MM_corrections, lxfac, trunc_1, trunc_2, l_normal_html, &
         sparkle, itemp_1, maxtxt, koment, sz, ss2, keywrd_quoted, &
         nl_atoms, use_ref_geo, prt_coords, pdb_label, step, &
-        density, norbs, method_indo, nclose, nopen, backslash, gui, os, git_hash, verson
+        density, norbs, method_indo, nclose, nopen, backslash, os, git_hash, verson, &
+        use_disk, run, numcal0, job_no0, step_num0
 !
       USE parameters_C, only : tore, ios, iop, iod, eisol, eheat, zs, eheat_sparkles, gss
 !
@@ -55,6 +58,10 @@
 !
       USE reimers_C, only: noh, nvl, cc0, nel, norb, norbl, norbh,&
           nshell, filenm, lenf, evalmo, nbt, multci, occfr, vca, vcb
+!
+#ifdef BUILD_MDI
+      use mdi_implementation, only: use_mdi, open_mdi, close_mdi, initialize_mdi, respond_to_commands
+#endif
 #ifdef GPU
       Use iso_c_binding
       Use mod_vars_cuda, only: lgpu, ngpus, gpu_id
@@ -64,13 +71,9 @@
       implicit none
       integer ::  i, j, k, l
       double precision :: eat,  tim, store_fepsi
-      logical :: exists, opend, sparkles_available, l_OLDDEN
-      double precision, external :: C_triple_bond_C, reada, seconds
+      logical :: exists, opend, l_OLDDEN
+      double precision, external :: reada, seconds
       character :: nokey(20)*10
-#ifdef _OPENMP
-      integer :: num_threads, default_num_threads
-      integer, external :: omp_get_max_threads
-#endif
 #ifdef MKL
       integer :: num_threads
       integer, external :: mkl_get_max_threads
@@ -87,29 +90,42 @@
       character*3        :: on_off(6)
       integer(c_int), dimension(6)	 :: clockRate, major, minor, name_size
 #endif
-! set versioning information
-#ifdef MOPAC_VERSION_FULL
-      verson = MOPAC_VERSION_FULL
-#endif
-#ifdef MOPAC_OS
-      os = MOPAC_OS
-#endif
-#ifdef MOPAC_GIT_HASH
-      git_hash = MOPAC_GIT_HASH
+#ifdef BUILD_MDI
+      if (close_mdi) goto 100
 #endif
 ! parse command-line flags
 #ifdef MOPAC_F2003
       do i = 1, command_argument_count()
         call get_command_argument (i, jobnam)
 #else
-      do i = 1, iargc()
+      do i = 1, command_argument_count()
         call getarg (i, jobnam)
 #endif
         if (jobnam == '-V' .OR. jobnam == '--version') then
+#ifdef MOPAC_GIT_HASH
           write(*,"(a)") "MOPAC version "//trim(verson)//" commit "//trim(git_hash)
+#else
+          write(*,"(a)") "MOPAC version "//trim(verson)
+#endif
           stop
-        endif
+        end if
+#ifndef BUILD_MDI
+        if (jobnam == '-mdi' .OR. jobnam == '--mdi') then
+          write(*,*) "This MOPAC executable was not compiled with MDI support"
+          stop
+        end if
+#endif
       end do
+! save state reference to use only relative state values in API calls
+      numcal0 = numcal
+      job_no0 = job_no
+      step_num0 = step_num
+! other initialization to prevent hysteresis between API calls (add more as needed)
+      keywrd = ' '
+      keywrd_txt = ' '
+      keywrd_quoted = ' '
+      refkey = ' '
+      call summary("",-21) ! reset MOPAC's error handler
 !------------------------------------------------------------------------
       tore = ios + iop + iod
       call fbx                            ! Factorials and Pascal's triangle (pure constants)
@@ -135,7 +151,7 @@
       filenm = trim(jobnam)
       lenf = i+1
       l = 0
- 11   open(unit=iw, file=output_fn, status='UNKNOWN', position='asis', iostat = i)
+ 11   open(unit=iw, file=output_fn, iostat = i)
       if (i /= 0) then
         l = l + 1
         write(0,"(i3,3a)")21 - l," File """,output_fn(:len_trim(output_fn)),""" is unavailable for use"
@@ -165,7 +181,7 @@
    10 continue
       numcal = numcal + 1      ! A new calculation
       job_no = job_no + 1      ! A new job
-      if (job_no > 1) then
+      if (job_no > 1+job_no0) then
         backspace(ir)
         read(ir,'(a)', iostat = i) line
         if (i == 0) then
@@ -182,6 +198,7 @@
       ediel  = 0.d0
       gnorm  = 0.D0
       press  = 0.d0
+      voigt  = 0.d0
       E_disp = 0.d0
       E_hb   = 0.d0
       E_hh   = 0.d0
@@ -212,18 +229,19 @@
       nelecs = 0
       pdb_label = .false.
       l_normal_html = .true.
+      use_disk = .true.
       state_Irred_Rep = " "
-      if (job_no > 1) then
+      if (job_no > 1+job_no0) then
         i = index(keywrd, " BIGCYCL")
         if (i /= 0 .and. index(keywrd,' DRC') == 0) then
           i = nint(reada(keywrd, i)) + 1
-          if (job_no < i) then
+          if (job_no < i+job_no0) then
             fepsi = store_fepsi
             goto 90
           end if
         end if
       end if
-      if (numcal > 1 .and. numcal < 4 .and. index(keywrd_txt," GEO_DAT") /= 0) then
+      if (numcal > 1+numcal0 .and. numcal < 4+numcal0 .and. index(keywrd_txt," GEO_DAT") /= 0) then
 !
 !  Quickly jump over first three lines
 !
@@ -233,7 +251,7 @@
         natoms = i
         call gettxt
       end if
-      if (numcal > 1) call to_screen("To_file: Leaving MOPAC")
+      if (numcal > 1+numcal0) call to_screen("To_file: Leaving MOPAC")
 !
 !    Read in all the data for the current job
 !
@@ -249,21 +267,11 @@
         if (j /= 0) i = i - 6 + j
       end if
       inquire(file=line(:i)//".den", exist=l_OLDDEN)
-90      if (moperr .and. numcal == 1 .and. natoms > 1) goto 101
-      if (moperr .and. numcal == 1 .and. index(keywrd_txt," GEO_DAT") == 0) goto 100
+90      if (moperr .and. numcal == 1+numcal0 .and. natoms > 1) goto 101
+      if (moperr .and. numcal == 1+numcal0 .and. index(keywrd_txt," GEO_DAT") == 0) goto 100
       if (moperr) goto 101
-! Adjust maximum number of threads using the OpenMP API
-#ifdef _OPENMP
-      if (numcal == 1) default_num_threads = omp_get_max_threads()
-      i = index(keywrd, " THREADS")
-      if (i > 0) then
-        num_threads = nint(reada(keywrd, i))
-      else
-        num_threads = default_num_threads
-      end if
-      call omp_set_num_threads(num_threads)
-#endif
-      if (numcal == 1) then
+      if (numcal == 1+numcal0) then
+        call magma_setup(keywrd, iw)   ! GPU eigensolver selection (mopac_magma; no-op without -DMOPAC_MAGMA)
 #ifdef MKL
         num_threads = min(mkl_get_max_threads(), 20)
         i = index(keywrd, " THREADS")
@@ -341,7 +349,7 @@
         lgpu = (lgpu_ref .and. natoms > 100) ! Warning - there are problems with UHF calculations on small systems
 #endif
       end if
-      if (.not. gui .and. numcal == 1 .and. natoms == 0) then
+      if (numcal == 1+numcal0 .and. natoms == 0) then
         write(line,'(2a)')" Data set exists, but does not contain any atoms."
         write(0,'(//10x,a,//)')trim(line)
         call mopend(trim(line))
@@ -360,7 +368,7 @@
         natoms = 0
         goto 100
       end if
-      if (numcal == 1 .and. moperr .or. natoms == 0) then
+      if (numcal == 1+numcal0 .and. moperr .or. natoms == 0) then
 !
 !   Check for spurious "extra" data
 !
@@ -386,34 +394,12 @@
     !  if (method_PM8) method_PM7 = .true.
       if (index(keywrd_quoted,' EXTERNAL=') + index(keywrd,' EXTERNAL') /= 0) call datin (ir, iw)
       if (moperr) go to 100
-      sparkle = (index(keywrd, " SPARKL") /= 0)
 !
-!  Check to see if SPARKLES are needed and, if need, can they be used.
+!  Check to see if SPARKLES are used
 !
-      sparkles_available = .true.
-!
-! Are SPARKLES needed?
-!
-      do i = 1, natoms
-        if (labels(i) > 83) cycle
-        if  (zs(labels(i)) < 0.1d0) then
-!
-! Can SPARKLES be used?
-!
-          sparkles_available = (sparkles_available .and. (gss(labels(i)) > 0.1d0))
-          if (.not. sparkle) then
-            line = " "
-            do j = 1, 10
-              if (atom_names(labels(i))(j:j) /= " ") exit
-            end do
-            write (line, '(A,a)') ' Data are not available for ', atom_names(labels(i))(j:)//"."
-            if (index(keywrd, " 0SCF") == 0) then
-              if (sparkles_available) write(iw,*)" (Parameters are available if SPARKLE is used)"
-              call mopend(trim(line))
-              goto 100
-            end if
-          end if
-        end if
+      sparkle = .false.
+      do i = 1, numat
+        if  (labels(i) > 56 .and. labels(i) < 72 .and. zs(labels(i)) < 0.1d0) sparkle = .true.
       end do
       do i = 57,71
         if (zs(i) < 0.1d0) tore(i) = 3.d0
@@ -432,7 +418,7 @@
       if (.false.) then
         inquire(unit=iarc, opened=opend)
         if (opend) close (iarc)
-        open(unit=iarc, file=archive_fn(:len_trim(archive_fn) - 3)//"mop", status='UNKNOWN', position='asis')
+        open(unit=iarc, file=archive_fn(:len_trim(archive_fn) - 3)//"mop")
         rewind iarc
 !
 !   Remove unwanted keywords
@@ -475,7 +461,7 @@
             if (line(i:i) == "/" .or. line(i:i) == backslash) exit
           end do
         end if
-        open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+        open(unit=iarc, file=trim(line))
         rewind iarc
         if (index(keywrd,' 0SCF') /= 0 .and. index(keywrd, " MINI") /= 0 .and. nl_atoms > 0) then
           open(unit=l, file=xyz_fn)
@@ -511,8 +497,8 @@
         end if
       end if
       if (mozyme) then
-        if (index(keywrd, " PREC") /= 0) then
-          call l_control("PREC", len_trim("PREC"), -1)
+        if (index(keywrd, " PRECISE") /= 0) then
+          call l_control("PRECISE", len_trim("PRECISE"), -1)
           if (index(keywrd, " LET") == 0) call l_control("LET", len_trim("LET"), 1)
         end if
       end if
@@ -639,7 +625,7 @@
           inquire(unit=iarc, opened=opend)
           if (opend) close(iarc)
           archive_fn = archive_fn(:len_trim(archive_fn) - 3)//"arc"
-          open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis')
+          open(unit=iarc, file=archive_fn)
           rewind iarc
           if (index(keywrd, " NOOPT") + index(keywrd," OPT") == 0)   then
             if (index(keywrd, " RESEQ") + index(keywrd, " ADD-H") + index(keywrd, " SITE=") /= 0 ) then
@@ -666,7 +652,7 @@
                   if (line(i:i) == "/" .or. line(i:i) == backslash) exit
                 end do
               end if
-            open(unit=iarc, file=trim(line), status='UNKNOWN', position='asis')
+            open(unit=iarc, file=trim(line))
             rewind iarc
             call pdbout(iarc)
           end if
@@ -678,7 +664,7 @@
           end if
           inquire(unit=iarc, opened=opend)
           if (opend) close (iarc)
-          open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis')
+          open(unit=iarc, file=archive_fn)
           rewind iarc
           if (pdb_label) then
 !
@@ -784,7 +770,6 @@
       end if
       eat = sum(eisol(nat(:numat)))
       atheat = atheat - eat*fpc_9
-      atheat = atheat + C_triple_bond_C()
       rxn_coord = 1.d9
 !
 !  All data for the current job are now read in, and all parameters are
@@ -800,7 +785,7 @@
             archive_fn = archive_fn(:len_trim(archive_fn) - 3)//"pdb"
             inquire(unit=iarc, opened=opend)
             if (opend) close(iarc)
-            open(unit=iarc, file=archive_fn, status='UNKNOWN', position='asis')
+            open(unit=iarc, file=archive_fn)
             rewind iarc
             call pdbout(iarc)
           end if
@@ -824,6 +809,18 @@
         if (moperr) goto 101
         if (index(keywrd, " RAPID") /= 0) call set_up_rapid("ON")
       end if
+!
+! Initialize & run MDI, if activated
+!
+#ifdef BUILD_MDI
+      call initialize_mdi
+      if (open_mdi) return
+      if (use_mdi) then
+        call respond_to_commands
+        goto 100
+      end if
+#endif
+!
       if (index(keywrd,' 1SCF') /= 0 .or. method_indo) then
         if (method_indo .and. index(keywrd,' 1SCF') == 0) then
           write (iw,*) "WARNING: INDO only performs single-point calculations"
@@ -987,57 +984,56 @@
         end if
 98      continue
       end if
-      if ( .not. gui) then
-        if (allocated(p)) deallocate(p)
-        if (allocated(react)) deallocate(react)
-        inquire (file = end_fn, exist = exists)
-        if (exists) then
-          open(unit=iend, file=end_fn, status='UNKNOWN', position='asis', iostat=i)
-          close(iend, status = 'delete', iostat=i)
-        end if
-         itemp_1 = ncomments
-        if (index(keywrd, " ADD-H PDBOUT") == 0 .or. &
-           index(koment, " From PDB file") == 0) ncomments = 0
-        if (index(keywrd_txt," GEO_DAT") /= 0) then
-          i = index(keywrd_txt," GEO_DAT") + 9
-          j = index(keywrd_txt(i + 10:),'" ') + i + 9
-          write(line,'(a)')"GEO_DAT="//keywrd_txt(i:j)
-          call l_control(trim(line), len_trim(line), 1)
-        end if
-        call delete_MOZYME_arrays()
+      if (allocated(p)) deallocate(p)
+      if (allocated(react)) deallocate(react)
+      inquire (file = end_fn, exist = exists)
+      if (exists) then
+        open(unit=iend, file=end_fn, iostat=i)
+        close(iend, status = 'delete', iostat=i)
+      end if
+        itemp_1 = ncomments
+      if (index(keywrd, " ADD-H PDBOUT") == 0 .or. &
+          index(koment, " From PDB file") == 0) ncomments = 0
+      if (index(keywrd_txt," GEO_DAT") /= 0) then
+        i = index(keywrd_txt," GEO_DAT") + 9
+        j = index(keywrd_txt(i + 10:),'" ') + i + 9
+        write(line,'(a)')"GEO_DAT="//keywrd_txt(i:j)
+        call l_control(trim(line), len_trim(line), 1)
+      end if
+      call delete_MOZYME_arrays()
 !
 ! Delete density matrix if it was made by MOZYME
 !
-        if (.not. l_OLDDEN .and. index(keywrd, " NEWDEN") == 0) then
-          j = len_trim(end_fn)
-          inquire (file = end_fn(:j - 3)//"den", exist = exists)
-          if (exists) then
-            open(unit = iend, file = end_fn(:j - 3)//"den", status='OLD', iostat=i)
-            if (i == 0) close(iend, status = 'delete', iostat=i)
-          end if
+      if (.not. l_OLDDEN .and. index(keywrd, " NEWDEN") == 0) then
+        j = len_trim(end_fn)
+        inquire (file = end_fn(:j - 3)//"den", exist = exists)
+        if (exists) then
+          open(unit = iend, file = end_fn(:j - 3)//"den", status='OLD', iostat=i)
+          if (i == 0) close(iend, status = 'delete', iostat=i)
         end if
-        go to 10
       end if
+      go to 10
 !
 ! Carefully delete all arrays created using "allocate"
 !
-  101 if ( .not. gui) then
-        call setup_mopac_arrays(0,0)
-        call delete_MOZYME_arrays()
-      end if
+  101 call setup_mopac_arrays(0,0)
+      call delete_MOZYME_arrays()
       call summary(" ",1)
       if (tim > 1.d7) tim = tim - 1.d7
       write (iw, '(3/,'' TOTAL JOB TIME: '',F16.2,'' SECONDS'')') tim
       write (iw, '(/,'' == MOPAC DONE =='')')
       call fdate (line)
-      write(*,'(//10x,a,/)')"MOPAC Job: """//trim(job_fn)//""" ended normally on "// &
-      line(5:10)//", "//trim(line(21:))//", at"//line(11:16)//"."
+      ! suppress stdout when running as an API call
+      if (run /= 2) then
+        write(*,'(//10x,a,/)')"MOPAC Job: """//trim(job_fn)//""" ended normally on "// &
+        line(5:10)//", "//trim(line(21:))//", at"//line(11:16)//"."
+      end if
 !
 !  Delete files that are definitely not wanted
 !
       inquire (file = end_fn, exist = exists)
       if (exists) then
-        open(unit=iend, file=end_fn, status='UNKNOWN', position='asis', iostat=i)
+        open(unit=iend, file=end_fn, iostat=i)
         close(iend, status = 'delete', iostat=i)
       end if
       inquire(unit=ir, opened=opend)
@@ -1059,7 +1055,7 @@ subroutine special
   use molkst_C, only : jobnam, refkey, line
   implicit none
   integer :: iprt = 33, i, j, k, len_key
-  open(unit=iprt, file=jobnam(:len_trim(jobnam) - 0)//"_(PM6).arc", status='UNKNOWN', position='asis', iostat = i)
+  open(unit=iprt, file=jobnam(:len_trim(jobnam) - 0)//"_(PM6).arc", iostat = i)
   do i = 1, 6
     if (index(refkey(i), " NULL") /= 0) exit
     line = refkey(i)

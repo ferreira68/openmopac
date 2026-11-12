@@ -1,18 +1,17 @@
 ! Molecular Orbital PACkage (MOPAC)
-! Copyright (C) 2021, Virginia Polytechnic Institute and State University
+! Copyright 2021 Virginia Polytechnic Institute and State University
 !
-! MOPAC is free software: you can redistribute it and/or modify it under
-! the terms of the GNU Lesser General Public License as published by
-! the Free Software Foundation, either version 3 of the License, or
-! (at your option) any later version.
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
 !
-! MOPAC is distributed in the hope that it will be useful,
-! but WITHOUT ANY WARRANTY; without even the implied warranty of
-! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-! GNU Lesser General Public License for more details.
+!    http://www.apache.org/licenses/LICENSE-2.0
 !
-! You should have received a copy of the GNU Lesser General Public License
-! along with this program.  If not, see <https://www.gnu.org/licenses/>.
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
 
       subroutine pathk()
 !-----------------------------------------------
@@ -116,8 +115,7 @@
       else
         write (iw, '(''  ABOUT TO ENTER EF FROM PATHK'')')
         if (index(keywrd,'RESTAR') /= 0) then
-          open(unit=ires, file=restart_fn, status='UNKNOWN', form=&
-            'UNFORMATTED', position='asis')
+          open(unit=ires, file=restart_fn, form='UNFORMATTED')
           rewind ires
           read (ires, end=60, err=60) i, l
           if (norbs /= l .or. numat /= i) then
@@ -259,8 +257,7 @@
       '(/16X,''POINTS ON REACTION PATH '',/16X,''AND CORRESPONDING HEATS'',2/)')
       inquire(unit=iarc, opened=opend)
       if (opend) close(unit=iarc, status='KEEP')
-      open(unit=iarc, file=archive_fn, status='UNKNOWN', position=&
-        'asis')
+      open(unit=iarc, file=archive_fn)
       write (iarc, 30)
       call wrttxt (iarc)
    30 format(' ARCHIVE FILE FOR PATH CALCULATION'/,&
@@ -321,9 +318,9 @@
     write(iprt,"(a)")"@media print { .noprint {display:none} .printonly {display:block}}"
     write(iprt,"(a)")"@media screen {.noprint {display:block} .printonly {display:none}}"
     write(iprt,"(a)")"</style>"
-    write(iprt,"(a)")"<script type=""text/javascript"" src=""../jsmol/JSmol.min.js""></script>"
-    write(iprt,"(a)")"<script type=""text/javascript"" src=""../jsmol/js/Jmol2.js""></script>"
-    write(iprt,"(a)")"<script type=""text/javascript"" src=""../jsmol/flot/jquery.flot2.js""></script>"
+    write(iprt,"(a)")"<script type=""text/javascript"" src=""/jsmol/JSmol.min.js""></script>"
+    write(iprt,"(a)")"<script type=""text/javascript"" src=""/jsmol/js/Jmol2.js""></script>"
+    write(iprt,"(a)")"<script type=""text/javascript"" src=""/jsmol/flot/jquery.flot2.js""></script>"
     write(iprt,"(a)")""
     write(iprt,"(a)")"<script type=""text/javascript"">"
     write(iprt,"(a)")"function roundoff(x,ndec){"
@@ -549,9 +546,8 @@
     write(iprt,"(a)")"<div id=""appletdiv"" style=""width:450;height:470;text-align:center"">"
     write(iprt,"(a)")"<script type=""text/javascript"">"
     write(iprt,"(a)")""
-    write(iprt,"(a)")"  Jmol.Info.j2sPath = ""../jsmol/j2s"""
+    write(iprt,"(a)")"  Jmol.Info.j2sPath = ""/jsmol/j2s"""
     write(iprt,"(a)")"  "
-    write(iprt,"(a)")" jmolInitialize(""java"",""JmolAppletSigned0.jar"")"
     write(iprt,"(a)")" jmolSetAppletColor(""lightblue"");"
     write(iprt,"(a)")" jmolApplet(600, ""set antialiasDisplay;set loadStructCallback 'plotEnergies';"// &
       "set animFrameCallback 'doHighlight'; load "" + modelFile);"
