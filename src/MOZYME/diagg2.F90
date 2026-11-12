@@ -42,8 +42,14 @@
     logical, save :: debug, times
     integer :: i, ii, jur, l
     integer, save :: icalcn = 0
-    integer :: ij, ilr, incv, iur, j, jlr, jncf, k, le, lf, lij, loopi, loopj, &
+    integer :: ij, ilr, incv, iur, j, jlr, jncf, k, le, lf, loopi, loopj, &
    & mie, mle, mlee, mlf, mlff, ncei, ncfj, nrej
+    integer :: nthr, nround, r, q, nrp1
+    double precision :: sbp1
+    integer, allocatable :: rnd(:), lastv(:), lasto(:), nrv(:), rstart(:), rorder(:), iusedt(:)
+    logical, allocatable :: latomst(:)
+    double precision, allocatable :: sbv(:), storeit(:), storejt(:)
+!$  integer, external :: omp_get_max_threads
     double precision :: a, alpha, b, beta, biglim, c, d, e, sum
     double precision, save :: const, eps, eta, bigeps
     double precision, external :: reada
@@ -149,8 +155,102 @@
     end if
     sumb = 0.d0
     nrej = 0
-    lij = 0
-    outer_loop: do ij = 1, nij
+!
+!   The 2 by 2 rotation of pair (i, j) reads and writes only virtual LMO i and occupied LMO j (their
+!   coefficients, atom lists and reserved storage) and scratch arrays that it resets. Rotations of pairs
+!   with no LMO in common therefore commute exactly. With more than one OpenMP thread the pairs are put
+!   into rounds: each pair goes into round max(last round of LMO i, last round of LMO j) + 1, so every
+!   LMO still sees its rotations in list order, and the pairs of a round, which share no LMO, run in
+!   parallel. The LMOs are then bitwise the same as with the serial sweep, for any number of threads.
+!   sumb (printed with DEBUG) is summed in list order from per-pair sums; it differs in the last bits
+!   only when a pair is retried with a halved angle.
+!
+    nthr = 1
+!$  nthr = omp_get_max_threads()
+    if (nthr > 1 .and. nij >= 1000) then
+      allocate (rnd(nij), lastv(nvir), lasto(nocc), sbv(nij), nrv(nij))
+      lastv = 0
+      lasto = 0
+      nround = 0
+      do ij = 1, nij
+        rnd(ij) = 0
+        i = ifmo(1, ij)
+        j = ifmo(2, ij)
+        if (Abs (fmo(ij)) < tiny) cycle
+        c = fmo(ij) * const
+        d = eigs(j) - eigv(i) - shift
+        if (Abs (c/d) < biglim) cycle
+        rnd(ij) = Max (lastv(i), lasto(j)) + 1
+        lastv(i) = rnd(ij)
+        lasto(j) = rnd(ij)
+        nround = Max (nround, rnd(ij))
+      end do
+      allocate (rstart(nround + 2), rorder(nij))
+      rstart = 0
+      do ij = 1, nij
+        if (rnd(ij) > 0) rstart(rnd(ij) + 2) = rstart(rnd(ij) + 2) + 1
+      end do
+      rstart(1) = 1
+      rstart(2) = 1
+      do k = 3, nround + 2
+        rstart(k) = rstart(k - 1) + rstart(k)
+      end do
+      do ij = 1, nij             ! rstart(r+1) is the next free slot of round r; afterwards it is the
+        if (rnd(ij) > 0) then    ! start of round r+1: the pairs of round r are rorder(rstart(r):rstart(r+1)-1)
+          rorder(rstart(rnd(ij) + 1)) = ij
+          rstart(rnd(ij) + 1) = rstart(rnd(ij) + 1) + 1
+        end if
+      end do
+      sbv = 0.d0
+      nrv = 0
+!$omp parallel default(shared) private(r, q, ij, iusedt, latomst, storeit, storejt)
+      allocate (iusedt(numat), latomst(numat), storeit(norbs), storejt(norbs))
+      iusedt(:) = -1
+      latomst(:) = .false.
+      do r = 1, nround
+!$omp do schedule(dynamic, 4)
+        do q = rstart(r), rstart(r + 1) - 1
+          ij = rorder(q)
+          call pair (ij, iusedt, latomst, storeit, storejt, sbv(ij), nrv(ij))
+        end do
+!$omp end do
+      end do
+      deallocate (iusedt, latomst, storeit, storejt)
+!$omp end parallel
+      do ij = 1, nij
+        if (rnd(ij) > 0) then
+          sumb = sumb + sbv(ij)
+          nrej = nrej + nrv(ij)
+        end if
+      end do
+      deallocate (rnd, lastv, lasto, sbv, nrv, rstart, rorder)
+    else
+      do ij = 1, nij
+        sbp1 = 0.d0
+        nrp1 = 0
+        call pair (ij, iused, latoms, storei, storej, sbp1, nrp1)
+        sumb = sumb + sbp1
+        nrej = nrej + nrp1
+      end do
+    end if
+    nrejct(2) = nrejct(1)
+    nrejct(1) = nrej
+    if (times) then
+      call timer (" AFTER DIAGG2 IN ITER")
+    end if
+  contains
+    subroutine pair (ij, iused, latoms, storei, storej, sbp, nrejp)
+! The rotation of pair ij of the list (the loop body of the original diagg2). Adds |beta| of each
+! attempt to sbp and the number of rejected attempts to nrejp.
+      integer, intent(in) :: ij
+      integer, intent(inout) :: iused(numat)
+      logical, intent(inout) :: latoms(numat)
+      double precision, intent(inout) :: storei(norbs), storej(norbs)
+      double precision, intent(inout) :: sbp
+      integer, intent(inout) :: nrejp
+      integer :: i, ii, jur, l, ilr, incv, iur, j, jlr, jncf, k, le, lf, loopi, loopj, mie, mle, mlee, mlf, mlff, &
+        ncei, ncfj
+      double precision :: a, alpha, b, beta, c, d, e, sum
       i = ifmo(1, ij)
       j = ifmo(2, ij)
       if (Abs (fmo(ij)) >= tiny) then
@@ -193,12 +293,11 @@
           !
           !   STORAGE DONE.
           !
-          lij = lij + 1
           e = Sign (Sqrt(4.d0*c*c+d*d), d)
           alpha = Sqrt (0.5d0*(1.d0+d/e))
           do
             beta = -Sign (Sqrt(1.d0-alpha*alpha), c)
-            sumb = sumb + Abs (beta)
+            sbp = sbp + Abs (beta)
             !
             ! IDENTIFY THE ATOMS IN THE OCCUPIED LMO.  ATOMS NOT USED ARE
             ! FLAGGED BY '-1' IN IUSED.
@@ -306,7 +405,7 @@
             end do
           exit
       1000  continue
-            nrej = nrej + 1
+            nrejp = nrejp + 1
               !
               !   THE ARRAY BOUNDS WERE GOING TO BE EXCEEDED.
               !   TO PREVENT THIS, RESET THE LMOS.
@@ -334,7 +433,7 @@
                 !
               alpha = 0.5d0 * (alpha+1.d0)
             else
-              cycle outer_loop
+              return              ! (was: cycle outer_loop)
             end if
           end do
         !
@@ -350,10 +449,5 @@
           end do
         end if
       end if
-    end do outer_loop
-    nrejct(2) = nrejct(1)
-    nrejct(1) = nrej
-    if (times) then
-      call timer (" AFTER DIAGG2 IN ITER")
-    end if
+    end subroutine pair
   end subroutine diagg2
