@@ -20,7 +20,7 @@ subroutine buildf (f, partf, mode)
     integer, intent (in) :: mode
     double precision, dimension (mpack), intent (in) :: partf
     double precision, dimension (mpack), intent (inout) :: f
-    integer :: alloc_stat
+    integer :: alloc_stat, i
     double precision, dimension(:), allocatable :: q, qe
     double precision, dimension(:,:), allocatable :: ptot2
    !
@@ -33,9 +33,15 @@ subroutine buildf (f, partf, mode)
        call memory_error ("buildf")
        goto 100
     end if
-    if (mode ==-1) f(:mpack) = partf(:mpack) - h(:mpack)
-    if (mode == 0) f(:mpack) =                 h(:mpack)
-    if (mode == 1) f(:mpack) = partf(:mpack) + h(:mpack)
+    ! Elementwise, so the OpenMP split does not change any value (mpack can be 10**8: one thread
+    ! copying F = H takes tens of milliseconds per SCF iteration).
+!$omp parallel do schedule(static) default(shared) private(i)
+    do i = 1, mpack
+      if (mode == -1) f(i) = partf(i) - h(i)
+      if (mode ==  0) f(i) = h(i)
+      if (mode ==  1) f(i) = partf(i) + h(i)
+    end do
+!$omp end parallel do
     if (id == 0) then
       !
       !  Discrete system
