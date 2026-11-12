@@ -100,7 +100,7 @@ subroutine acc_density_kernels(numat, mpack, nclose, licocc, lcocc, nij, iorbs, 
   double precision, intent(inout) :: p(mpack)
   double precision, parameter :: scale = 2.d0**58, unscale = 2.d0**(-58)
   integer, allocatable :: offo(:)
-  integer :: i, jj, kk, j, k, l, j1, k1, nj, ja, ka, n0, nf, loop, m
+  integer :: i, jj, kk, j, k, l, j1, k1, nj, nk, ja, ka, n0, nf, loop, m, t, nt, x
   integer(8) :: v
   double precision :: s
   allocate (offo(licocc))
@@ -110,7 +110,7 @@ subroutine acc_density_kernels(numat, mpack, nclose, licocc, lcocc, nij, iorbs, 
   do m = 1, mpack
     pacc(m) = 0_8
   end do
-  !$acc parallel loop gang vector_length(128) private(n0, nf, loop, l)
+  !$acc parallel loop gang vector_length(128) private(n0, nf, loop, l, nt)
   do i = 1, nclose
     n0 = nncf(i)
     nf = ncf(i)
@@ -121,40 +121,59 @@ subroutine acc_density_kernels(numat, mpack, nclose, licocc, lcocc, nij, iorbs, 
       offo(n0 + jj) = l
       l = l + iorbs(icocc(n0 + jj))
     end do
-    !$acc loop vector collapse(2) private(j, k, nj, ja, ka, l, j1, k1, s, v)
-    do jj = 1, nf
-      do kk = 1, nf
-        j = icocc(n0 + jj)
-        k = icocc(n0 + kk)
-        nj = iorbs(j)
-        ja = offo(n0 + jj)
-        ka = loop + offo(n0 + kk)
-        if (j == k) then
-          l = nij(j, k)
+! Each unordered pair of the LMO's atoms once (positions jj >= kk of the triangle, index t), the
+! block row being the atom with the larger index (nij(a, b), a > b) as in the CPU code. Products are
+! rounded as cocc*(s*scale): scale is a power of 2, so this equals (cocc*s)*scale, bit for bit.
+    nt = (nf*(nf + 1))/2
+    !$acc loop vector private(jj, kk, j, k, nj, nk, ja, ka, l, j1, k1, s, v, x)
+    do t = 1, nt
+      jj = int((sqrt(8.0*real(t) - 7.0) + 1.0)*0.5)
+      do while ((jj*(jj - 1))/2 >= t)
+        jj = jj - 1
+      end do
+      do while ((jj*(jj + 1))/2 < t)
+        jj = jj + 1
+      end do
+      kk = t - (jj*(jj - 1))/2
+      j = icocc(n0 + jj)
+      k = icocc(n0 + kk)
+      ja = loop + offo(n0 + jj)
+      ka = loop + offo(n0 + kk)
+      if (j < k) then
+        x = j
+        j = k
+        k = x
+        x = ja
+        ja = ka
+        ka = x
+      end if
+      nj = iorbs(j)
+      if (j == k) then
+        l = nij(j, j)
+        do j1 = 1, nj
+          s = cocc(ja + j1)*scale
+          do k1 = 1, j1
+            l = l + 1
+            v = nint(cocc(ja + k1)*s, 8)
+            !$acc atomic update
+            pacc(l) = pacc(l) + v
+          end do
+        end do
+      else
+        l = nij(j, k)
+        if (l >= 0) then
+          nk = iorbs(k)
           do j1 = 1, nj
-            s = cocc(ja + j1 + loop)
-            do k1 = 1, j1
+            s = cocc(ja + j1)*scale
+            do k1 = 1, nk
               l = l + 1
-              v = nint(cocc(ka + k1)*s*scale, 8)
+              v = nint(cocc(ka + k1)*s, 8)
               !$acc atomic update
               pacc(l) = pacc(l) + v
             end do
           end do
-        else if (j > k) then
-          l = nij(j, k)
-          if (l >= 0) then
-            do j1 = 1, nj
-              s = cocc(ja + j1 + loop)
-              do k1 = 1, iorbs(k)
-                l = l + 1
-                v = nint(cocc(ka + k1)*s*scale, 8)
-                !$acc atomic update
-                pacc(l) = pacc(l) + v
-              end do
-            end do
-          end if
         end if
-      end do
+      end if
     end do
   end do
   !$acc parallel loop gang vector
