@@ -678,7 +678,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !      & qdenet, qscnet, gden, qscat
 
      use linear_cosmo, only: addfckz
-    use acc_mozyme_C, only : fd_ok, pd_ok, allow_sdgpu, allow_ddgpu, n_sdpairs, n_ddpairs, acc_pair_on_gpu, acc_sp_atom
+    use acc_mozyme_C, only : fd_ok, pd_ok, allow_sdgpu, allow_ddgpu, n_sdpairs, n_ddpairs, acc_pair_on_gpu
 
     implicit none
    !***********************************************************************
@@ -786,7 +786,8 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !   called at the end, after the one-center and COSMO terms, so that the device copy of F is
    !   complete); the pair loop below is then skipped (npass = 0), or, if the device-memory plan
    !   keeps some NDDO pairs with d orbitals on the CPU (allow_sdgpu, allow_ddgpu; acc_pair_on_gpu),
-   !   runs for those only (filter = 1; 2 = all other pairs; 0 = all). MOPAC_ACC_FOCK=test: the GPU
+   !   computes those only (filter = 1, acc_fz2n_cpu_dpairs, OpenMP; 2 = all other pairs, in the loop
+   !   below; 0 = all, in the loop below). MOPAC_ACC_FOCK=test: the GPU
    !   terms go into a copy of F, the CPU loop computes all pairs into F (in two passes if some pairs
    !   are on the CPU, the copy being taken after the first), and the two are compared.
     p_on_device = pd_ok        ! set by the GPU density build if the device copy of P is current
@@ -830,6 +831,10 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
       tg = dble(c1 - c0)/dble(crate)
       filter = 2
     end if
+    if (filter == 1) then
+      call acc_fz2n_cpu_dpairs (f, ptot, iorbs, nat, coord)   ! the pairs kept on the CPU, OpenMP
+      cycle
+    end if
     kr = 0
     ired = 1
     do ii = 1, numat
@@ -842,9 +847,6 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
         end if
         iab = iorbs(ii)
         if (iab /= 0) then
-          if (filter == 1 .and. allow_sdgpu) then
-            if (acc_sp_atom(nat(ii), iab)) cycle   ! all pairs of this atom are on the GPU (direct mode)
-          end if
           jred = 1
           iim1 = ii - ione
           do jj = 1, iim1

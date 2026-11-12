@@ -62,11 +62,12 @@ module acc_mozyme_C
 ! 10 % (e.g. after a code change that alters the stack).
 ! Levels (shedding order, by benefit per byte): 1 everything on the GPU; 2 d,d pairs on the CPU;
 ! 3 all pairs with d orbitals on the CPU; 4 also the density; 5 also diagg1 (Fock only); 6 nothing.
-! Level 1 is considered only if there are at least min_dd_gpu (1,000) d,d pairs: the d,d kernel
-! reserves gigabytes, and on the CPU (fz2n, serial) a d,d pair costs about 20 us per Fock build
-! (17-22 us measured, DMSO boxes of 4,950-319,600 d,d pairs, Ultra 9 275HX), so 1,000 pairs cost
-! about 20 ms per build. Below that the time saved does not justify the memory (PTP1B, 171 d,d pairs:
-! about 0.2 s per SCF).
+! Level 1 is considered only if there are at least min_dd_gpu d,d pairs: the d,d kernel reserves
+! gigabytes, so it is used only where the CPU would spend noticeable time. On the CPU
+! (acc_fz2n_cpu_dpairs, OpenMP) a d,d pair costs about 20 us per Fock build and thread (17-22 us
+! measured, DMSO boxes of 4,950-319,600 d,d pairs, Ultra 9 275HX; with 16 threads the CPU d,d pass
+! took 5.6 s vs 5.2 s on the GPU at 19,900 pairs). min_dd_gpu = 1,000 x the number of OpenMP
+! threads, i.e. about 20 ms per build (1,000 without OpenMP; 16,000 with 16 threads).
   use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long, c_int, c_char, c_funptr
   implicit none
   integer, allocatable :: nij(:,:)
@@ -78,9 +79,18 @@ module acc_mozyme_C
   logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false.
   logical :: allow_sdgpu = .false., allow_ddgpu = .false.   ! s,p-d and d,d NDDO pairs on the GPU
   integer(8), parameter :: stack_rotate = 71168_8, stack_rotate_sp = 6720_8, stack_rotate_spd = 20912_8
-  integer, parameter :: min_dd_gpu = 1000
+  integer, parameter :: min_dd_per_thread = 1000
+  integer :: min_dd_gpu = 1000          ! set by acc_mozyme_plan: min_dd_per_thread x OpenMP threads
   integer(8) :: lmem_sp = 0, lmem_sd = 0, lmem_dd = 0, lmem_held = 0   ! predicted reservations; largest so far
   integer :: n_sdpairs = 0, n_ddpairs = 0                 ! NDDO pairs of each kind with d orbitals (acc_fz2n)
+! The NDDO pairs with d orbitals (built by acc_fz2n, used by its kernels and by acc_fz2n_cpu_dpairs):
+! dp_i > dp_j, their kind dp_cls (acc_pair_class: 1 s,p-d, 2 d,d), the indices of each kind (dp_isd,
+! dp_idd), per atom the list of those pairs (dp_list from dp_start: +k, the atom is dp_i(k); -k, it is
+! dp_j(k)), in increasing k, and per pair the contributions to the two diagonal blocks (dp_ci for
+! dp_i, dp_cj for dp_j).
+  integer :: dp_nd = 0, dp_nsd = 0, dp_ndd = 0
+  integer, allocatable :: dp_i(:), dp_j(:), dp_cls(:), dp_isd(:), dp_idd(:), dp_start(:), dp_list(:)
+  double precision, allocatable :: dp_ci(:,:), dp_cj(:,:)
   integer(8) :: held_lists = 0, held_cand = 0   ! device bytes held by acc_fz2n's pair lists, diagg1's buffers
   interface
     type(c_ptr) function c_acc_malloc(bytes) bind(C, name="acc_malloc")
@@ -320,6 +330,7 @@ contains
     use common_arrays_C, only : nat
     use chanel_C, only : iw
     integer, external :: acc_fock_mode, acc_diagg_mode, acc_density_mode
+!$  integer, external :: omp_get_max_threads
     logical :: want_fock, want_diagg, want_dens, f, g, d, sdg, ddg
     integer(8) :: free, total, avail, limit, headroom, b_nij, b_fp, b_pacc, b_lists, b_cand, b_lmo_g, b_lmo_d, slots
     integer(8) :: npair, npair_d, npair_sd, npair_dd, lcocc, lcvir, licocc, licvir
@@ -386,6 +397,8 @@ contains
 ! MOPAC_ACC_MEM_LEVEL (testing) starts the search at the given level.
 ! MOPAC_ACC_MEM_LEVEL=1 forces the d,d kernel even with fewer than min_dd_gpu d,d pairs.
     k0 = 1
+    min_dd_gpu = min_dd_per_thread
+!$  min_dd_gpu = min_dd_per_thread*max(1, omp_get_max_threads())
     if (npair_dd < min_dd_gpu) k0 = 2
     call get_environment_variable("MOPAC_ACC_MEM_LEVEL", lev, status=stat)
     if (stat == 0) then
@@ -597,7 +610,9 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   use parameters_C, only : dorbs, iod
   use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
     fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_sdgpu, allow_ddgpu, n_sdpairs, &
-    n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end
+    n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end, &
+    nd => dp_nd, nsd => dp_nsd, ndd => dp_ndd, dpi => dp_i, dpj => dp_j, dcls => dp_cls, isd => dp_isd, &
+    idd => dp_idd, dstart => dp_start, dlist => dp_list, cdi => dp_ci, cdj => dp_cj
   use iso_c_binding, only : c_f_pointer
   use common_arrays_C, only : fcom => f, pcom => p
   use chanel_C, only : iw
@@ -614,13 +629,9 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   integer(8) :: free0
   integer :: c
   double precision, pointer, contiguous :: fdev(:), pdev(:)
-  integer, save :: nnear = 0, my_gen = -1, nd = 0, nsd = 0, ndd = 0
+  integer, save :: nnear = 0, my_gen = -1
   integer, allocatable, save :: nstart(:), near(:)
-! NDDO pairs that involve d orbitals: dpi > dpj, their kind dcls (acc_pair_class: 1 s,p-d, 2 d,d),
-! the indices of each kind (isd, idd), and per atom the list of those pairs (dlist, +k: the atom is
-! dpi(k); -k: the atom is dpj(k)), in increasing k.
-  integer, allocatable, save :: dpi(:), dpj(:), dcls(:), isd(:), idd(:), dstart(:), dlist(:)
-  double precision, allocatable, save :: cdi(:,:), cdj(:,:)
+! The NDDO pairs with d orbitals (dpi, dpj, ... ) are module arrays of acc_mozyme_C (dp_*).
   logical, save :: unsupported = .false.
   integer :: kd, m
   integer, allocatable :: dtmp(:)
@@ -912,6 +923,66 @@ subroutine acc_fz2n_dsum(numat, mpack, nd, f, iorbs, nij, dstart, dlist, dcls, s
   end do
   !$acc end data
 end subroutine acc_fz2n_dsum
+#endif
+
+subroutine acc_fz2n_cpu_dpairs(f, ptot, iorbs, nat, coord)
+! The NDDO pairs with d orbitals that the device-memory plan keeps on the CPU (acc_pair_on_gpu false),
+! for fz2n, with OpenMP: the scheme of the GPU kernels (integrals, acc_dpair_contract, then the
+! diagonal blocks summed per atom over its pairs in a fixed order), so the result does not depend on
+! the number of threads. Uses the pair lists built by the preceding acc_fz2n (prepare) call.
+#ifdef _OPENACC
+  use molkst_C, only : numat, mpack
+  use acc_mozyme_C, only : nij, allow_sdgpu, allow_ddgpu, nd => dp_nd, dpi => dp_i, dpj => dp_j, dcls => dp_cls, &
+    dstart => dp_start, dlist => dp_list, cdi => dp_ci, cdj => dp_cj
+#endif
+  implicit none
+  double precision, intent(inout) :: f(*)
+  double precision, intent(in) :: ptot(*), coord(3, *)
+  integer, intent(in) :: iorbs(*), nat(*)
+#ifdef _OPENACC
+  logical :: oncpu(2)
+  integer :: kd, ii, jj, kr, a, e, npk, m
+  double precision :: w(2025), e1b(45), e2a(45), enuc, s
+  oncpu(1) = .not. allow_sdgpu
+  oncpu(2) = .not. allow_ddgpu
+  if (nd == 0 .or. .not. (oncpu(1) .or. oncpu(2))) return
+!$omp parallel do schedule(dynamic, 16) default(shared) private(kd, ii, jj, kr, w, e1b, e2a, enuc)
+  do kd = 1, nd
+    if (.not. oncpu(dcls(kd))) cycle
+    ii = dpi(kd)
+    jj = dpj(kd)
+    if (dcls(kd) == 1) then
+      call rotate_spd(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, e1b, e2a, enuc)
+    else
+      kr = 1
+      call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, kr, e1b, e2a, enuc)
+    end if
+    call acc_dpair_contract(kd, nd, mpack, iorbs(ii), iorbs(jj), nij(ii, ii), nij(jj, jj), nij(ii, jj), w, f, &
+      ptot, cdi, cdj)
+  end do
+!$omp end parallel do
+!$omp parallel do schedule(dynamic, 64) default(shared) private(a, e, npk, m, kd, s)
+  do a = 1, numat
+    if (dstart(a + 1) == dstart(a)) cycle
+    npk = (iorbs(a)*(iorbs(a) + 1))/2
+    do e = 1, npk
+      s = 0.d0
+      do m = dstart(a), dstart(a + 1) - 1
+        kd = abs(dlist(m))
+        if (.not. oncpu(dcls(kd))) cycle
+        if (dlist(m) > 0) then
+          s = s + cdi(e, kd)
+        else
+          s = s + cdj(e, kd)
+        end if
+      end do
+      f(nij(a, a) + e) = f(nij(a, a) + e) + s
+    end do
+  end do
+!$omp end parallel do
+#endif
+end subroutine acc_fz2n_cpu_dpairs
+#ifdef _OPENACC
 
 subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, nstart, near, lnear)
   implicit none
