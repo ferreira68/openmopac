@@ -62,8 +62,11 @@ module acc_mozyme_C
 ! 10 % (e.g. after a code change that alters the stack).
 ! Levels (shedding order, by benefit per byte): 1 everything on the GPU; 2 d,d pairs on the CPU;
 ! 3 all pairs with d orbitals on the CPU; 4 also the density; 5 also diagg1 (Fock only); 6 nothing.
-! Level 1 is considered only if there are at least min_dd_gpu d,d pairs: the d,d kernel reserves
-! gigabytes, and a few thousand d,d pairs cost the CPU little.
+! Level 1 is considered only if there are at least min_dd_gpu (1,000) d,d pairs: the d,d kernel
+! reserves gigabytes, and on the CPU (fz2n, serial) a d,d pair costs about 20 us per Fock build
+! (17-22 us measured, DMSO boxes of 4,950-319,600 d,d pairs, Ultra 9 275HX), so 1,000 pairs cost
+! about 20 ms per build. Below that the time saved does not justify the memory (PTP1B, 171 d,d pairs:
+! about 0.2 s per SCF).
   use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long, c_int, c_char, c_funptr
   implicit none
   integer, allocatable :: nij(:,:)
@@ -75,7 +78,7 @@ module acc_mozyme_C
   logical :: allow_fock = .false., allow_diagg = .false., allow_dens = .false.
   logical :: allow_sdgpu = .false., allow_ddgpu = .false.   ! s,p-d and d,d NDDO pairs on the GPU
   integer(8), parameter :: stack_rotate = 71168_8, stack_rotate_sp = 6720_8, stack_rotate_spd = 20912_8
-  integer, parameter :: min_dd_gpu = 20000
+  integer, parameter :: min_dd_gpu = 1000
   integer(8) :: lmem_sp = 0, lmem_sd = 0, lmem_dd = 0, lmem_held = 0   ! predicted reservations; largest so far
   integer :: n_sdpairs = 0, n_ddpairs = 0                 ! NDDO pairs of each kind with d orbitals (acc_fz2n)
   integer(8) :: held_lists = 0, held_cand = 0   ! device bytes held by acc_fz2n's pair lists, diagg1's buffers
