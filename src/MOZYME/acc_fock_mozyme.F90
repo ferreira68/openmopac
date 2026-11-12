@@ -203,7 +203,7 @@ module acc_mozyme_C
 ! split between GPU and CPU changes (acc_path_update); each mode/detail pair at most once per job, so the
 ! plan repeated at every SCF of a geometry optimization adds nothing. Timing decisions are reported only
 ! with TIMES or DEBUG. tests/compare_output.py skips these lines ("Using ... execution", "... on CPU|GPU").
-  character(len=4000) :: path_said = ''     ! every mode/detail pair written in this job
+  character(len=8000) :: path_said = ''     ! every mode/detail pair written in this job
   character(len=40) :: path_mode = ''       ! the mode of the last "Using ... execution" line
   character(len=200) :: gpu_why = ''        ! why no device is usable (acc_gpu_usable)
   character(len=160) :: gpu_desc = ''       ! the device used
@@ -524,16 +524,23 @@ contains
 #endif
   end function acc_device_name
 
-  subroutine acc_path_say(mode, detail)
-! Writes " Using <mode> execution" (unless that is the mode written last) and the detail line, unless this
-! mode/detail pair was written before in this job. mode = '' writes the detail line alone.
+  subroutine acc_path_say(mode, detail, stable)
+! Writes " Using <mode> execution" and the detail line when the mode differs from the mode written last,
+! or when this mode/detail pair has not been written in this job. stable (default: detail) is the part of
+! the detail that identifies the split; numbers that vary between plans (device memory) are left out of
+! it, so a re-plan with the same split writes nothing. mode = '' writes the detail line alone.
     use chanel_C, only : iw
     character(len=*), intent(in) :: mode, detail
+    character(len=*), intent(in), optional :: stable
     character(len=600) :: key
-    key = '{'//trim(mode)//'|'//trim(detail)//'}'
-    if (index(path_said, trim(key)) /= 0) return
-    if (len_trim(path_said) + len_trim(key) > len(path_said)) path_said = ''
-    path_said = trim(path_said)//trim(key)
+    if (present(stable)) then
+      key = '{'//trim(mode)//'|'//trim(stable)//'}'
+    else
+      key = '{'//trim(mode)//'|'//trim(detail)//'}'
+    end if
+    if (index(path_said, trim(key)) /= 0 .and. (len_trim(mode) == 0 .or. trim(mode) == trim(path_mode))) return
+    if (index(path_said, trim(key)) == 0 .and. len_trim(path_said) + len_trim(key) <= len(path_said)) &
+      path_said = trim(path_said)//trim(key)   ! when full, keep the history (and report new splits again)
     if (len_trim(mode) > 0 .and. trim(mode) /= trim(path_mode)) then
       write (iw, '(3a)') ' Using ', trim(mode), ' execution'
       path_mode = mode
@@ -556,7 +563,7 @@ contains
 #ifdef _OPENACC
     if (.not. mozyme) then
 #ifdef MOPAC_MAGMA
-      call acc_path_say('GPU/CPU hybrid', 'conventional SCF on CPU; dense eigensolves on GPU (MAGMA) where they fit')
+      continue   ! magma_setup reports the mode once it knows whether MAGMA has a GPU
 #else
       call acc_path_say('CPU', 'conventional SCF on CPU (this build runs MOZYME on GPU)')
 #endif
@@ -573,7 +580,7 @@ contains
 #else
     if (.false.) write (path_said, '(2a)') trim(keywrd), mozyme   ! no GPU code in this build
 #ifdef MOPAC_MAGMA
-    call acc_path_say('GPU/CPU hybrid', 'SCF on CPU; dense eigensolves on GPU (MAGMA) where they fit')
+    continue   ! magma_setup reports the mode once it knows whether MAGMA has a GPU
 #else
     call acc_path_say('CPU', 'everything on CPU (built without GPU support)')
 #endif
@@ -597,7 +604,7 @@ contains
 ! Reports the current split between GPU and CPU from the plan's flags (allow_*), the paths turned
 ! off by MOPAC_ACC_*=0, the notes, and why (the reason for a change), unless already reported in this job.
     character(len=*), intent(in) :: why
-    character(len=400) :: cpu
+    character(len=400) :: cpu, stable
     character(len=40) :: mode
     logical :: any_gpu
     cpu = ''
@@ -620,19 +627,24 @@ contains
     if (len_trim(path_notes) > 0) call add(trim(path_notes))
     any_gpu = allow_fock .or. allow_dens .or. allow_diagg
     if (.not. any_gpu) cpu = 'MOZYME on CPU'
+    stable = cpu
+    if (len_trim(path_mem) > 0) stable = trim(stable)//' (device memory)'
     if (len_trim(path_mem) > 0) cpu = trim(cpu)//' ('//trim(path_mem)//')'
     if (len_trim(why) > 0) cpu = trim(cpu)//' ('//trim(why)//')'
+    if (len_trim(why) > 0) stable = trim(stable)//' ('//trim(why)//')'
     if (.not. any_gpu) then
       mode = 'CPU'
     else if (allow_fock .and. allow_dens .and. allow_diagg .and. (allow_ddgpu .or. path_ndd == 0) .and. &
       (allow_sdgpu .or. path_nsd == 0) .and. path_want_f .and. path_want_d .and. path_want_g .and. &
       len_trim(path_notes) == 0) then
       mode = 'GPU'
-      if (path_dd_moved) cpu = 'd,d NDDO pairs on GPU (moved after first Fock builds)'
+      cpu = 'Fock build, density, DIAGG1 and energy on GPU'
+      if (path_dd_moved) cpu = trim(cpu)//' (d,d NDDO pairs moved there after first Fock builds)'
+      stable = cpu
     else
       mode = 'GPU/CPU hybrid'
     end if
-    call acc_path_say(mode, cpu)
+    call acc_path_say(mode, cpu, stable)
   contains
     subroutine add(item)
       character(len=*), intent(in) :: item

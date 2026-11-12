@@ -118,22 +118,25 @@ contains
     integer(c_int) :: ndev, dev, stat, major, minor
     integer(c_size_t) :: free_b, total_b, best_free
     integer :: i, req, maxgpu, lead
-    logical :: usable(0:63)
+    logical :: usable(0:63), conv
     logical, save :: done = .false.
     double precision, external :: reada
 
     if (done) return
     done = .true.
+    conv = index(keywrd, " MOZYME") == 0   ! a MOZYME job has its own execution-path line (acc_path_start)
     magma_on = .false.
     magma_timing = index(keywrd, " TIMES") /= 0
     maxgpu = 64
     if (index(keywrd, " NOGPU") /= 0) then
+      if (conv) write (iw, '(a)') " Using CPU execution"
       write (iw, '(a)') " dense eigensolves on CPU (LAPACK; keyword NOGPU)"
       return
     end if
     ndev = 0
     stat = cudaGetDeviceCount(ndev)
     if (stat /= 0 .or. ndev < 1) then
+      if (conv) write (iw, '(a)') " Using CPU execution"
       write (iw, '(a,i0,a)') " dense eigensolves on CPU (LAPACK; no usable CUDA device, cudaGetDeviceCount status ", stat, &
         ")"
       return
@@ -162,6 +165,7 @@ contains
     end if
     if (req >= 0) then
       if (.not. usable(req)) then
+        if (conv) write (iw, '(a)') " Using CPU execution"
         write (iw, '(a,i0,a)') " dense eigensolves on CPU (LAPACK; SETGPU=", req + 1, &
           " is not a device this MAGMA build supports)"
         return
@@ -185,16 +189,19 @@ contains
         end if
       end do
       if (dev < 0) then
+        if (conv) write (iw, '(a)') " Using CPU execution"
         write (iw, '(2a)') " dense eigensolves on CPU (LAPACK; no visible device is supported by this MAGMA build,", &
           " which needs compute capability 8.6-8.9 or 12.x)"
         return
       end if
     end if
     if (cudaSetDevice(dev) /= 0) then
+      if (conv) write (iw, '(a)') " Using CPU execution"
       write (iw, '(a,i0,a)') " dense eigensolves on CPU (LAPACK; cudaSetDevice(", dev, ") failed)"
       return
     end if
     if (magma_init() /= 0) then
+      if (conv) write (iw, '(a)') " Using CPU execution"
       write (iw, '(a)') " dense eigensolves on CPU (LAPACK; magma_init failed)"
       return
     end if
@@ -203,10 +210,12 @@ contains
     magma_device = dev
     magma_on = .true.
     if (magma_ngpu > 1) then
+      if (conv) write (iw, '(a)') " Using GPU/CPU hybrid execution"
       write (iw, '(a,i0,a,i0,a,i0,a)') " dense eigensolves of order >= ", magma_min_n, &
         " on GPU when they fit (MAGMA multi-GPU magma_dsyevd_m, ", &
         magma_ngpu, " GPUs, CUDA devices 0-", magma_ngpu - 1, ")"
     else
+      if (conv) write (iw, '(a)') " Using GPU/CPU hybrid execution"
       write (iw, '(a,i0,a,i0,a,i0,a,i0,a,f7.1,a,f7.1,a)') " dense eigensolves of order >= ", magma_min_n, &
         " on GPU when they fit (MAGMA, CUDA device ", dev, " of ", ndev, &
         ", arch ", magma_getdevice_arch(), ", ", dble(free_b)/1024.d0**3, " of ", dble(total_b)/1024.d0**3, " GiB free)"
