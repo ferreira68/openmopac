@@ -47,6 +47,7 @@
         coorda, txtatm, txtatm1, break_coords, breaks, nbonds, tvec, lopt_store
 !
       use MOZYME_C, only : start_res, lstart_res, start_letter
+      use acc_mozyme_C, only : acc_path_start
 !
       USE funcon_C, only : fpc, a0, ev
       use conref_C, only : fpcref
@@ -832,6 +833,7 @@
       write (iw, &
         '(1X,14(''*****''),''*********'')')
       if (moperr) return
+      call acc_path_start()   ! MOPAC execution path (GPU, GPU/CPU hybrid or CPU) and why
       if (index(keywrd, " LOCATE-TS") /= 0 .and. index(keywrd, " LOCATE-TS(SET") == 0) lopt(:,:natoms) = 1
       if (index(keywrd, "INVERT") /= 0) then
         nvar = 0

@@ -34,28 +34,14 @@
 !   K4  occupied LMO energies, one gang per LMO.
 ! If the candidate buffer overflows, ok = .false. is returned and diagg1 runs on the CPU.
 !
-! Enabled by the environment variable MOPAC_ACC_DIAGG ("test": run both and compare).
+! On in an OpenACC build when a usable GPU is present (acc_gpu_mode): off with NOGPU or MOPAC_ACC_DIAGG=0;
+! MOPAC_ACC_DIAGG=test runs both and compares.
 
 integer function acc_diagg_mode()
+! Mode of the GPU diagg1 (acc_gpu_mode): 0 CPU, 1 GPU, 2 both, compared (MOPAC_ACC_DIAGG=test).
+  use acc_mozyme_C, only : acc_gpu_mode
   implicit none
-  integer, save :: mode = -1
-#ifdef _OPENACC
-  character(len=16) :: env
-  integer :: stat
-  if (mode < 0) then
-    call get_environment_variable("MOPAC_ACC_DIAGG", env, status=stat)
-    if (stat /= 0) then
-      mode = 0
-    else if (trim(env) == 'test') then
-      mode = 2
-    else
-      mode = 1
-    end if
-  end if
-#else
-  mode = 0
-#endif
-  acc_diagg_mode = mode
+  acc_diagg_mode = acc_gpu_mode("MOPAC_ACC_DIAGG")
 end function acc_diagg_mode
 
 subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo_in, fmo, fmo_dim, nij, &
@@ -65,7 +51,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   use MOZYME_C, only : ncf, nce, nncf, nnce, ncocc, ncvir, icocc, icvir, cocc, cvir, iorbs, nfmo
   use common_arrays_C, only : nfirst, nlast, p
   use acc_mozyme_C, only : nij_d => nij, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_matches_device, &
-    fd_c, pd_c, fd_ok, pd_ok, allow_diagg, held_cand, eimp_dev
+    fd_c, pd_c, fd_ok, pd_ok, allow_diagg, held_cand, eimp_dev, acc_report
   use common_arrays_C, only : fcom => f
   use iso_c_binding, only : c_f_pointer
   use chanel_C, only : iw
@@ -146,7 +132,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     end if
   else
     nreuse = nreuse + 1
-    if (nreuse == 1) write (iw, '(a)') ' ACC DIAGG: using the device copies of F and P from the GPU Fock build'
+    if (nreuse == 1 .and. acc_report()) write (iw, '(a)') ' ACC DIAGG: using the device copies of F and P from the GPU Fock build'
   end if
   call c_f_pointer(fd_c, fdev, [mpack])
   call c_f_pointer(pd_c, pdev, [mpack])

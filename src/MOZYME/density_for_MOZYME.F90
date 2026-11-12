@@ -28,7 +28,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     use MOZYME_C, only : lijbo, nijbo, ncf, ncocc, &
       nncf, iorbs, cocc, icocc
     use chanel_C, only: iw
-    use acc_mozyme_C, only : pd_ok
+    use acc_mozyme_C, only : pd_ok, acc_path_note
     implicit none
     integer, intent (in) :: mode, nclose_loc
     double precision, dimension (mpack), intent (in) :: partp
@@ -55,7 +55,15 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     !
     pd_ok = .false.
     gmode = 0
-    if (mode == 0 .and. lijbo) gmode = acc_density_mode()
+    if (mode == 0 .and. lijbo) then
+      gmode = acc_density_mode()
+    else if (acc_density_mode() /= 0) then
+      if (.not. lijbo) then
+        call acc_path_note('density (no atom-pair index table)')
+      else
+        call acc_path_note('density (partial updates: only some atoms move)')
+      end if
+    end if
     if (gmode == 1) then
       call acc_density_core (p, nclose_loc, .true., gok)
       if (gok) go to 900

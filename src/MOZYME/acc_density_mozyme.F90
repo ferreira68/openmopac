@@ -26,28 +26,14 @@
 ! The result is left in the device buffer pd (pd_ok = .true.) and copied to the host p, so the
 ! next Fock build need not copy P to the device.
 !
-! Enabled by the environment variable MOPAC_ACC_DENS ("test": run both and compare).
+! On in an OpenACC build when a usable GPU is present (acc_gpu_mode): off with NOGPU or MOPAC_ACC_DENS=0;
+! MOPAC_ACC_DENS=test runs both and compares.
 
 integer function acc_density_mode()
+! Mode of the GPU density build (acc_gpu_mode): 0 CPU, 1 GPU, 2 both, compared (MOPAC_ACC_DENS=test).
+  use acc_mozyme_C, only : acc_gpu_mode
   implicit none
-  integer, save :: mode = -1
-#ifdef _OPENACC
-  character(len=16) :: env
-  integer :: stat
-  if (mode < 0) then
-    call get_environment_variable("MOPAC_ACC_DENS", env, status=stat)
-    if (stat /= 0) then
-      mode = 0
-    else if (trim(env) == 'test') then
-      mode = 2
-    else
-      mode = 1
-    end if
-  end if
-#else
-  mode = 0
-#endif
-  acc_density_mode = mode
+  acc_density_mode = acc_gpu_mode("MOPAC_ACC_DENS")
 end function acc_density_mode
 
 subroutine acc_density_core(p, nclose, resident, ok)

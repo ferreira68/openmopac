@@ -194,7 +194,7 @@ subroutine coscav
    ! SURFACE (SAS)
    !
    !***********************************************************************
-    use molkst_C, only : numat, lm61, mozyme, moperr
+    use molkst_C, only : numat, lm61, mozyme, moperr, keywrd
     use cosmo_C, only : lenabc, nps, area, isude, sude, &
        cosvol, rsolv, ioldcv, disex2, n0, dirvec, dirsm, srad, &
        cosurf, amat, bmat, iatsp, nar_csm, nsetf, phinet, arat
@@ -549,7 +549,8 @@ subroutine coscav
    ! Allocate AMAT (packed nps*(nps+1)/2) and BMAT(lm61, nps) from the actual segment
    ! count; reallocate only when a later geometry produces more segments.
     if (.not. mozyme) then
-      write(iw, '(/10x, a, i0, a, i0, a)') "NUMBER OF COSMO SEGMENTS (NPS) = ", nps, &
+      if (index(keywrd, " TIMES") /= 0 .or. index(keywrd, " DEBUG") /= 0) &   ! keeps normal output as upstream
+        write(iw, '(/10x, a, i0, a, i0, a)') "NUMBER OF COSMO SEGMENTS (NPS) = ", nps, &
         "  (worst-case LENABC = ", lenabc, ")"
       if (nps > 65535) then
         write(iw, '(/10x, a, i0, a)') "COSMO surface has ", nps, " segments; the packed Cholesky"

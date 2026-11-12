@@ -221,6 +221,33 @@ if(THREADS_KEYWORD)
   endif()
 endif()
 
+# OpenACC GPU code for MOZYME (Fock build, density matrix, diagg1, helecz: src/MOZYME/acc_*.F90).
+# Needs nvfortran (NVIDIA HPC SDK). GPU_OPENACC_ARCH lists the compute capabilities to build device
+# code for (two or three digits: 86 = sm_86, 120 = sm_120). At run time a device is used only if the
+# build has code it can run (same major version, minor version at most the device's); otherwise, or
+# with the NOGPU keyword, MOZYME runs on the CPU. The binary then needs the NVIDIA driver at run time.
+option(GPU_OPENACC "Build the OpenACC GPU code for MOZYME (requires nvfortran)" OFF)
+set(GPU_OPENACC_ARCH "86;120" CACHE STRING "Compute capabilities for the OpenACC device code, e.g. 80;86;89;90;120")
+if(GPU_OPENACC)
+  if(NOT CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
+    message(FATAL_ERROR "GPU_OPENACC requires the NVIDIA HPC SDK Fortran compiler (nvfortran); found ${CMAKE_Fortran_COMPILER_ID}")
+  endif()
+  set(_acc_cc "")
+  foreach(_acc_a ${GPU_OPENACC_ARCH})
+    list(APPEND _acc_cc "cc${_acc_a}")
+  endforeach()
+  list(JOIN _acc_cc "," _acc_gpu)
+  list(JOIN GPU_OPENACC_ARCH "," _acc_list)
+  message(STATUS "OpenACC GPU code for MOZYME: -acc=gpu -gpu=${_acc_gpu}")
+  # -Mbackslash: treat backslashes in strings literally, as the other compilers do
+  target_compile_options(mopac-core PUBLIC -Mbackslash -acc=gpu -gpu=${_acc_gpu})
+  target_link_options(mopac-core PUBLIC -acc=gpu -gpu=${_acc_gpu})
+  target_compile_definitions(mopac-core PRIVATE "MOPAC_ACC_CCS=${_acc_list}")
+  if(TARGET mopac-makpol)
+    target_compile_options(mopac-makpol PUBLIC -Mbackslash)
+  endif()
+endif()
+
 # MAGMA GPU eigensolver (src/matrix/mopac_magma.F90). Static by design: MAGMA_ROOT holds a static,
 # position-independent libmagma.a; CUDA_STATIC_LIB is a CUDA toolkit lib64 directory with the static
 # cuBLAS/cuBLASLt/cudart/culibos archives, so the result needs only the NVIDIA driver at run time.

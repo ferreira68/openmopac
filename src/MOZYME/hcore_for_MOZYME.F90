@@ -483,7 +483,6 @@ subroutine hcore_for_MOZYME ()
       write (iw, 10000) (wk(i), i=1, j)
     end if
   end if
-  call spd_integral_check()  ! rotate_spd vs rotate, bitwise (no-op unless MOPAC_ACC_INTEGRAL_TEST is set)
 contains
   subroutine hcore_rows_omp()
 ! OpenMP version of the atom-pair loop of hcore_for_MOZYME, for a molecular system (id = 0) in the

@@ -678,7 +678,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !      & qdenet, qscnet, gden, qscat
 
      use linear_cosmo, only: addfckz
-    use acc_mozyme_C, only : fd_ok, pd_ok, allow_sdgpu, allow_ddgpu, n_sdpairs, n_ddpairs, acc_pair_on_gpu
+    use acc_mozyme_C, only : fd_ok, pd_ok, allow_sdgpu, allow_ddgpu, n_sdpairs, n_ddpairs, acc_pair_on_gpu, acc_path_note
 
     implicit none
    !***********************************************************************
@@ -794,7 +794,17 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     fd_ok = .false.
     pd_ok = .false.
     acc_mode = 0
-    if (mode == 0 .and. direct .and. semidr .and. ione == 1) acc_mode = acc_fock_mode()
+    if (mode == 0 .and. direct .and. semidr .and. ione == 1) then
+      acc_mode = acc_fock_mode()
+    else if (acc_fock_mode() /= 0) then
+      if (ione /= 1) then
+        call acc_path_note('Fock build (periodic system)')
+      else if (.not. (direct .and. semidr)) then
+        call acc_path_note('Fock build (NODIRECT or SEMIDIRECT)')
+      else
+        call acc_path_note('Fock build (partial updates: only some atoms move)')
+      end if
+    end if
     npass = 1
     filter = 0
     tg = 0.d0

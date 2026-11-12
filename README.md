@@ -44,6 +44,56 @@ make
 MOPAC will build without any other CMake options if a Fortran compiler, BLAS/LAPACK, Python 3, and NumPy are found in the software environment.
 To build with optional [MolSSI Driver Interface(MDI)](https://molssi-mdi.github.io/MDI_Library/) engine support, use the CMake command-line option `-DMDI=ON`.
 
+## GPU acceleration (openmopac-gpu)
+
+This fork adds NVIDIA GPU acceleration for MOZYME, the linear-scaling SCF used for proteins and other large systems.
+On a whole protein (PTP1B, about 4,900 atoms, PM6, `CUTOFF=100`) the MOZYME SCF runs about 13x faster on an RTX 5090
+Laptop GPU than the CPU-only program, with the same result to the precision of the output.
+
+### Building
+
+The GPU code is written in OpenACC and needs the NVIDIA HPC SDK compiler (`nvfortran`):
+```
+FC=nvfortran CC=nvc cmake .. -DGPU_OPENACC=ON -DGPU_OPENACC_ARCH="86;120"
+make
+```
+`GPU_OPENACC_ARCH` lists the compute capabilities to build device code for (`86` covers sm_86 to sm_89, e.g. RTX 30/40-series
+and A40/L40S; `120` covers RTX 50-series and RTX PRO Blackwell; add `80` for A100 or `90` for H100). The program then needs
+the NVIDIA driver at run time. Builds without `GPU_OPENACC` are unchanged CPU builds.
+
+Optionally, `-DMAGMA_ROOT=<static MAGMA install> -DCUDA_STATIC_LIB=<CUDA lib64>` adds the MAGMA GPU eigensolver for the
+dense diagonalizations of conventional (non-MOZYME) SCF calculations.
+
+### What runs on the GPU
+
+In a GPU build, MOZYME uses the GPU automatically whenever a usable device is present: the Fock matrix build, the
+density matrix, the occupied-virtual screening and rotation setup of DIAGG1, and the electronic energy. The remaining
+steps (one-electron matrix, DIAGG2, convergence control) run on the CPU with OpenMP threads. If the device has too little
+memory for all of this, the parts that do not fit stay on the CPU. Conventional SCF calculations run on the CPU.
+
+Every output file states the execution path, in lines that start with `MOPAC execution path:`: **full GPU**,
+**GPU/CPU hybrid** (with what runs on the CPU and why), or **CPU** (and why: no GPU visible, `NOGPU`, a device the
+build has no code for, not enough device memory, ...). Example:
+```
+ MOPAC execution path: MOZYME on the GPU (device 1, NVIDIA GeForce RTX 5090 Laptop GPU, compute capability 12.0); ...
+ MOPAC execution path: full GPU (every MOZYME step with GPU code: Fock build, density, DIAGG1, energy)
+```
+The keywords `TIMES` or `DEBUG` add the details: device-memory plan, kernel reservations, transfer settings.
+
+### Keywords and environment variables
+
+| Name | Kind | Effect |
+|---|---|---|
+| `NOGPU` | keyword | Run everything on the CPU. |
+| `SETGPU=n` | keyword | Use visible GPU number `n` (1, 2, ...); the default is the first. |
+| `NOFEATHER` | keyword | Keep the full NDDO two-electron integrals under MOZYME. By default MOZYME blends the integrals of PM6 and later methods into point charges at long range ("feathering"), which changes the energy expression relative to the conventional SCF. |
+| `NOGASSCF` | keyword | With COSMO, start the SCF in solvent instead of converging a gas-phase SCF first. |
+| `MOPAC_ACC_FOCK`, `MOPAC_ACC_DIAGG`, `MOPAC_ACC_DENS` | environment | `0` keeps that step on the CPU; `test` runs it on both and writes the largest difference to the output on every call (validation). |
+| `MOPAC_ACC_MEM_LIMIT` | environment | Cap on the device memory MOZYME may use, in bytes or with a `KB`, `MB` or `GB` suffix (for a GPU shared with other jobs). |
+
+GPU and CPU results agree to the numerical precision of the algorithms (for a whole protein, heats of formation to
+within about 1e-4 kcal/mol).
+
 ## Usage
 
 While MOPAC is often used through its integration with other software such as [WebMO](https://www.webmo.net), it is primarily a command-line program

@@ -41,6 +41,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
        tiny, sumt, ijc, ovmax, ncf, nce, nncf, nnce, ncocc, ncvir, &
      & iorbs, icocc, icvir, cocc, cvir
     use common_arrays_C, only : eigs, nfirst, nlast, p
+    use acc_mozyme_C, only : acc_path_note
     implicit none
     integer, intent (in) :: idiagg, nocc, nvir, fmo_dim
     integer, intent (inout) :: nij
@@ -130,7 +131,11 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     !
     gmode = 0
     gok = .false.
-    if (lijbo) gmode = acc_diagg_mode()
+    if (lijbo) then
+      gmode = acc_diagg_mode()
+    else if (acc_diagg_mode() /= 0) then
+      call acc_path_note('DIAGG1 (no atom-pair index table)')
+    end if
     full = (idiagg <= 5 .or. Mod (idiagg, 2) == 0)
     docc = .not. (idiagg > 2 .and. Mod (idiagg, 4) /= 0)
     if (gmode == 1) then

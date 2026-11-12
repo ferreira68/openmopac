@@ -27,9 +27,11 @@
 ! deterministic. Each NDDO pair's integrals are evaluated twice, once by each atom's gang.
 ! The arithmetic of each term follows fz2n, jab_for_MOZYME and kab_for_MOZYME.
 !
-! Enabled by the environment variable MOPAC_ACC_FOCK: "test" also runs the CPU code and writes
-! the largest difference to the output for every Fock build; any other value uses the GPU.
-! Without OpenACC, acc_fock_mode returns 0 and the GPU routines are empty.
+! GPU paths (Fock build here, diagg1 and density elsewhere) are on in an OpenACC build whenever a
+! usable device is present (acc_gpu_mode): the keyword NOGPU turns them all off, SETGPU=n selects the
+! device, and the environment variables MOPAC_ACC_FOCK, MOPAC_ACC_DIAGG and MOPAC_ACC_DENS set to 0
+! turn one path off, or set to "test" also run the CPU code and write the largest difference to the
+! output on every call. Without OpenACC, the modes are 0 and the GPU routines are empty.
 
 module acc_mozyme_C
 ! Device-side MOZYME data shared by the OpenACC routines (acc_fz2n, acc_diagg1_core):
@@ -48,9 +50,9 @@ module acc_mozyme_C
 ! that fits (with headroom) is enabled, shedding first the NDDO pairs with d orbitals (kernel stacks,
 ! below), then the density (its accumulator), then diagg1, then the Fock build; whatever is not
 ! enabled runs on the CPU. The decision is written to the output. MOPAC_ACC_MEM_LIMIT (bytes, or
-! with suffix KB/MB/GB) caps the memory the plan may use, and MOPAC_ACC_MEM_LEVEL (1-6) sets the
-! first level tried, to test the fallbacks on a large card. A failed acc_malloc later disables the
-! GPU paths (CPU from then on) instead of stopping the program.
+! with suffix KB/MB/GB) caps the memory the plan may use (for a device shared with other jobs; a small
+! limit also exercises the fallback levels). A failed acc_malloc later disables the GPU paths (CPU from
+! then on) instead of stopping the program.
 !
 ! Local memory: CUDA reserves a kernel's per-thread stack for every thread slot of the device
 ! (SMs x maximum resident threads per SM), whatever the launch size, and keeps the reservation.
@@ -71,7 +73,7 @@ module acc_mozyme_C
 ! about 11 times an s,p-d pair on the GPU, Nsight Systems, RTX 5090 Laptop, 19,900 d,d / 360,000
 ! s,p-d pairs). The d,d pairs move to the GPU (acc_dd_decide) if the estimated saving exceeds f_dd
 ! (5 %) of an iteration and the reservation fits in the free device memory with the plan's headroom.
-! One decision per geometry. MOPAC_ACC_MEM_LEVEL=1 forces level 1.
+! One decision per geometry.
   use iso_c_binding, only : c_ptr, c_null_ptr, c_size_t, c_long_long, c_int, c_char, c_funptr
   implicit none
   integer, allocatable :: nij(:,:)
@@ -132,6 +134,14 @@ module acc_mozyme_C
       import :: c_int
       integer(c_int), value :: devtype
     end function c_acc_get_device_num
+    integer(c_int) function c_acc_get_num_devices(devtype) bind(C, name="acc_get_num_devices")
+      import :: c_int
+      integer(c_int), value :: devtype
+    end function c_acc_get_num_devices
+    subroutine c_acc_set_device_num(devnum, devtype) bind(C, name="acc_set_device_num")
+      import :: c_int
+      integer(c_int), value :: devnum, devtype
+    end subroutine c_acc_set_device_num
     type(c_ptr) function c_dlopen(name, flag) bind(C, name="dlopen")
       import :: c_ptr, c_char, c_int
       character(kind=c_char), dimension(*) :: name
@@ -154,6 +164,11 @@ module acc_mozyme_C
       integer(c_int) :: pi
       integer(c_int), value :: attrib, device
     end function cu_device_get_attribute
+    integer(c_int) function cu_device_get_name(name, len, device) bind(C)  ! cuDeviceGetName(char*, int, CUdevice)
+      import :: c_int, c_char
+      character(kind=c_char), dimension(*) :: name
+      integer(c_int), value :: len, device
+    end function cu_device_get_name
     integer(c_int) function cu_host_register(p, bytes, flags) bind(C)  ! cuMemHostRegister(void*, size_t, unsigned)
       import :: c_int, c_ptr, c_size_t
       type(c_ptr), value :: p
@@ -174,7 +189,6 @@ module acc_mozyme_C
 ! reallocated in setup_mopac_arrays, set_up_MOZYME_arrays, add_more_interactions (from hcore) and
 ! writmo); a pinned range must be unpinned before it is freed, because a new array at the same address
 ! would otherwise be read through the old, still-locked pages. Only common f, p and h are pinned.
-! MOPAC_ACC_PIN=0 disables pinning.
   integer, parameter :: pin_max = 4
   logical :: pin_scope = .false.
   integer :: pin_n = 0, pin_state = 0        ! pin_state: 0 not initialized, 1 available, -1 unavailable
@@ -183,6 +197,17 @@ module acc_mozyme_C
   logical :: pin_said(3) = .false.          ! the first pinning of f, p, h is reported
   procedure(cu_host_register), pointer :: pin_reg => null()
   procedure(cu_host_unregister), pointer :: pin_unreg => null()
+! Execution-path report, written in every build and every job (lines " MOPAC execution path: ..."):
+! at the start of the job (acc_path_start), after the device-memory plan (acc_mozyme_plan) and
+! whenever the split between GPU and CPU changes (acc_path_update): full GPU, GPU/CPU hybrid (what runs
+! on the CPU, and why) or CPU (why). The lines start with "MOPAC", which the MOPAC tests skip.
+  character(len=400) :: path_last = ''
+  character(len=200) :: gpu_why = ''        ! why no device is usable (acc_gpu_usable)
+  character(len=160) :: gpu_desc = ''       ! the device used
+  character(len=200) :: path_notes = ''     ! steps kept on the CPU for reasons other than memory (acc_path_note)
+  character(len=120) :: path_mem = ''       ! device-memory reason of the plan, if it shed a GPU path
+  logical :: path_planned = .false., path_want_f = .false., path_want_g = .false., path_want_d = .false.
+  integer :: path_nsd = 0, path_ndd = 0
 contains
   logical function acc_sp_atom(z, io)
 ! An atom (atomic number z, io orbitals) with an s or s,p basis and no d-orbital terms.
@@ -325,6 +350,7 @@ contains
     allow_diagg = .false.
     allow_dens = .false.
     write (iw, '(3a)') ' ACC MOZYME: device memory exhausted ', what, '; MOZYME continues on the CPU'
+    call acc_path_update('device memory exhausted '//what)
 #endif
   end subroutine acc_mozyme_give_up
 
@@ -348,6 +374,254 @@ contains
     pd_ok = .false.
 #endif
   end subroutine acc_mozyme_release
+
+  logical function acc_report()
+! Routine reports of the GPU code (device, memory plan, decisions, pinning) are written only with the
+! keyword TIMES or DEBUG, so that normal output matches the CPU program line for line (the MOPAC tests
+! compare outputs line by line). Warnings and the "test" comparisons are always written.
+    use molkst_C, only : keywrd
+    acc_report = index(keywrd, " TIMES") /= 0 .or. index(keywrd, " DEBUG") /= 0
+  end function acc_report
+
+  integer function acc_gpu_mode(envname)
+! Mode of one GPU path for this job: 0 CPU, 1 GPU, 2 both, compared ("test"). Off with the keyword
+! NOGPU or without a usable device (acc_gpu_usable); otherwise on, unless the path's environment
+! variable (MOPAC_ACC_FOCK, MOPAC_ACC_DIAGG, MOPAC_ACC_DENS) is "0", or "test".
+    use molkst_C, only : keywrd
+    character(len=*), intent(in) :: envname
+    character(len=16) :: env
+    integer :: stat
+    acc_gpu_mode = 0
+#ifdef _OPENACC
+    if (index(keywrd, " NOGPU") /= 0) return
+    if (.not. acc_gpu_usable()) return
+    acc_gpu_mode = 1
+    call get_environment_variable(envname, env, status=stat)
+    if (stat == 0) then
+      if (trim(env) == '0') acc_gpu_mode = 0
+      if (trim(env) == 'test') acc_gpu_mode = 2
+    end if
+#endif
+  end function acc_gpu_mode
+
+  logical function acc_gpu_usable()
+! Once per process: selects the device (keyword SETGPU=n, n = 1, 2, ... among the visible devices;
+! default the first) and checks that this build has device code it can run: one of the compute
+! capabilities in MOPAC_ACC_CCS (CMake GPU_OPENACC_ARCH) with the same major version and a minor
+! version no higher than the device's. Otherwise MOZYME runs on the CPU. The outcome is written once.
+! The device cannot change later in the same process (the device buffers live there).
+    use molkst_C, only : keywrd
+    use chanel_C, only : iw
+    integer, save :: state = 0                 ! 0 not yet checked, 1 usable, -1 not usable
+#ifdef _OPENACC
+#ifndef MOPAC_ACC_CCS
+#define MOPAC_ACC_CCS 86,120
+#endif
+    integer, parameter :: built(*) = [MOPAC_ACC_CCS]
+    integer :: ndev, i, n, dev, cc, k
+    double precision, external :: reada
+    logical :: ok
+    character(len=64) :: bad
+    bad = ''
+    if (state == 0) then
+      state = -1
+      ndev = c_acc_get_num_devices(4_c_int)            ! acc_device_nvidia
+      if (ndev < 1) then
+        gpu_why = 'no GPU visible'
+      else
+        i = index(keywrd, " SETGPU=")
+        if (i /= 0) then
+          n = nint(reada(keywrd, i))
+          if (n >= 1 .and. n <= ndev) then
+            call c_acc_set_device_num(int(n - 1, c_int), 4_c_int)
+          else
+            write (bad, '(a,i0,a,i0,a)') '; SETGPU=', n, ' is not one of the ', ndev, ' visible devices'
+          end if
+        end if
+        dev = c_acc_get_device_num(4_c_int)
+        cc = acc_device_cc(dev)
+        ok = .false.
+        do k = 1, size(built)
+          if (cc > 0 .and. cc/10 == built(k)/10 .and. mod(cc, 10) >= mod(built(k), 10)) ok = .true.
+        end do
+        write (gpu_desc, '(a,i0,3a,i0,a,i0,a)') 'device ', dev + 1, ', ', trim(acc_device_name(dev)), &
+          ', compute capability ', cc/10, '.', mod(cc, 10), trim(bad)
+        if (ok) then
+          state = 1
+        else
+          write (gpu_why, '(3a,20(i0,a))') 'GPU ', trim(gpu_desc), ' has no code in this build; built for compute capability ', &
+            (built(k)/10, '.', mod(built(k), 10), ' ', k = 1, size(built))
+        end if
+      end if
+    end if
+    acc_gpu_usable = (state == 1)
+#else
+    acc_gpu_usable = .false.
+#endif
+  end function acc_gpu_usable
+
+  character(len=96) function acc_device_name(devnum)
+! Name of CUDA device devnum (driver API through dlopen), or "unknown GPU".
+    use iso_c_binding, only : c_associated, c_f_procpointer, c_null_char
+    integer, intent(in) :: devnum
+    type(c_ptr) :: h
+    type(c_funptr) :: fp1, fp2
+    procedure(cu_device_get), pointer :: get_dev
+    procedure(cu_device_get_name), pointer :: get_name
+    integer(c_int) :: dev
+    character(kind=c_char) :: buf(96)
+    integer :: i
+    acc_device_name = 'unknown GPU'
+#ifdef _OPENACC
+    h = c_dlopen('libcuda.so.1'//c_null_char, 2_c_int)
+    if (.not. c_associated(h)) return
+    fp1 = c_dlsym(h, 'cuDeviceGet'//c_null_char)
+    fp2 = c_dlsym(h, 'cuDeviceGetName'//c_null_char)
+    if (.not. c_associated(fp1) .or. .not. c_associated(fp2)) return
+    call c_f_procpointer(fp1, get_dev)
+    call c_f_procpointer(fp2, get_name)
+    if (get_dev(dev, int(devnum, c_int)) /= 0) return
+    buf = c_null_char
+    if (get_name(buf, 95_c_int, dev) /= 0) return
+    acc_device_name = ''
+    do i = 1, 95
+      if (buf(i) == c_null_char) exit
+      acc_device_name(i:i) = buf(i)
+    end do
+#endif
+  end function acc_device_name
+
+  subroutine acc_path_say(text)
+! Writes the execution path, unless it is the one written last in this job.
+    use chanel_C, only : iw
+    character(len=*), intent(in) :: text
+    if (trim(text) == trim(path_last)) return
+    path_last = text
+    write (iw, '(2a)') ' MOPAC execution path: ', trim(text)
+  end subroutine acc_path_say
+
+  subroutine acc_path_start()
+! Called for every job after the keywords are written (readmo): the execution path at the start
+! and, if MOZYME will not use the GPU, why. For MOZYME on the GPU the split between GPU and CPU is
+! reported after the device-memory plan of the first SCF (acc_path_update).
+    use molkst_C, only : keywrd, mozyme
+    path_last = ''
+    path_notes = ''
+    path_mem = ''
+    path_planned = .false.
+#ifdef _OPENACC
+    if (.not. mozyme) then
+#ifdef MOPAC_MAGMA
+      call acc_path_say('conventional SCF on the CPU; dense eigensolves on the GPU (MAGMA) where they fit')
+#else
+      call acc_path_say('CPU (conventional SCF; this build runs MOZYME on the GPU)')
+#endif
+    else if (index(keywrd, " NOGPU") /= 0) then
+      call acc_path_say('CPU (keyword NOGPU)')
+    else if (.not. acc_gpu_usable()) then
+      call acc_path_say('CPU ('//trim(gpu_why)//')')
+    else if (acc_gpu_mode("MOPAC_ACC_FOCK") == 0 .and. acc_gpu_mode("MOPAC_ACC_DIAGG") == 0 .and. &
+      acc_gpu_mode("MOPAC_ACC_DENS") == 0) then
+      call acc_path_say('CPU (MOPAC_ACC_FOCK, MOPAC_ACC_DIAGG and MOPAC_ACC_DENS are set to 0)')
+    else
+      call acc_path_say('MOZYME on the GPU ('//trim(gpu_desc)// &
+        '); the split between GPU and CPU follows from the device memory, at the first SCF')
+    end if
+#else
+    if (.false.) write (path_last, '(2a)') trim(keywrd), mozyme   ! no GPU code in this build
+#ifdef MOPAC_MAGMA
+    call acc_path_say('CPU, except dense eigensolves on the GPU (MAGMA) where they fit')
+#else
+    call acc_path_say('CPU (built without GPU support)')
+#endif
+#endif
+  end subroutine acc_path_start
+
+  subroutine acc_path_note(what)
+! A GPU path is not used for a step for a reason other than device memory (e.g. partial Fock updates):
+! add it to the CPU list of the execution path (once per job).
+    character(len=*), intent(in) :: what
+    if (index(path_notes, what) /= 0) return
+    if (len_trim(path_notes) > 0) then
+      path_notes = trim(path_notes)//'; '//what
+    else
+      path_notes = what
+    end if
+    if (path_planned) call acc_path_update('')
+  end subroutine acc_path_note
+
+  subroutine acc_path_update(why)
+! Reports the current split between GPU and CPU from the plan's flags (allow_*), the paths turned
+! off by MOPAC_ACC_*=0, the notes, and why (the reason for a change), if it differs from the last line.
+    character(len=*), intent(in) :: why
+    character(len=400) :: cpu, text
+    logical :: any_gpu
+    cpu = ''
+    if (.not. path_want_f) call add('Fock build (MOPAC_ACC_FOCK=0)')
+    if (.not. path_want_d) call add('density (MOPAC_ACC_DENS=0)')
+    if (.not. path_want_g) call add('DIAGG1 (MOPAC_ACC_DIAGG=0)')
+    if (path_want_f .and. .not. allow_fock) then
+      call add('Fock build')
+    else if (allow_fock .and. path_nsd > 0 .and. .not. allow_sdgpu) then
+      call add('NDDO pairs with d orbitals in the Fock build')
+    else if (allow_fock .and. path_ndd > 0 .and. .not. allow_ddgpu) then
+      if (dd_pending) then
+        call add('d,d NDDO pairs in the Fock build (moved to the GPU after the first Fock builds if that pays)')
+      else
+        call add('d,d NDDO pairs in the Fock build')
+      end if
+    end if
+    if (path_want_d .and. .not. allow_dens) call add('density')
+    if (path_want_g .and. .not. allow_diagg) call add('DIAGG1')
+    if (len_trim(path_notes) > 0) call add(trim(path_notes))
+    any_gpu = allow_fock .or. allow_dens .or. allow_diagg
+    if (.not. any_gpu) then
+      text = 'CPU'
+      if (len_trim(path_mem) > 0) text = 'CPU ('//trim(path_mem)//')'
+    else if (len_trim(cpu) == 0) then
+      text = 'full GPU (every MOZYME step with GPU code: Fock build, density, DIAGG1, energy)'
+    else
+      text = 'GPU/CPU hybrid; on the CPU: '//trim(cpu)
+      if (len_trim(path_mem) > 0) text = trim(text)//' ('//trim(path_mem)//')'
+    end if
+    if (len_trim(why) > 0) text = trim(text)//' - '//why
+    call acc_path_say(text)
+  contains
+    subroutine add(item)
+      character(len=*), intent(in) :: item
+      if (len_trim(cpu) > 0) then
+        cpu = trim(cpu)//', '//item
+      else
+        cpu = item
+      end if
+    end subroutine add
+  end subroutine acc_path_update
+
+  integer function acc_device_cc(devnum)
+! Compute capability of CUDA device devnum as 10*major + minor, from the driver API (libcuda through
+! dlopen), or 0 if unavailable.
+    use iso_c_binding, only : c_associated, c_f_procpointer, c_null_char
+    integer, intent(in) :: devnum
+    type(c_ptr) :: h
+    type(c_funptr) :: fp1, fp2
+    procedure(cu_device_get), pointer :: get_dev
+    procedure(cu_device_get_attribute), pointer :: get_attr
+    integer(c_int) :: dev, major, minor
+    acc_device_cc = 0
+#ifdef _OPENACC
+    h = c_dlopen('libcuda.so.1'//c_null_char, 2_c_int)        ! RTLD_NOW
+    if (.not. c_associated(h)) return
+    fp1 = c_dlsym(h, 'cuDeviceGet'//c_null_char)
+    fp2 = c_dlsym(h, 'cuDeviceGetAttribute'//c_null_char)
+    if (.not. c_associated(fp1) .or. .not. c_associated(fp2)) return
+    call c_f_procpointer(fp1, get_dev)
+    call c_f_procpointer(fp2, get_attr)
+    if (get_dev(dev, int(devnum, c_int)) /= 0) return
+    if (get_attr(major, 75_c_int, dev) /= 0) return             ! CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR
+    if (get_attr(minor, 76_c_int, dev) /= 0) return             ! CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR
+    acc_device_cc = 10*major + minor
+#endif
+  end function acc_device_cc
 
   integer(8) function acc_thread_slots(devnum)
 ! Number of SMs x maximum resident threads per SM of CUDA device devnum, from the driver API
@@ -427,8 +701,7 @@ contains
     integer :: i, j, dev, k
     double precision, parameter :: gb = 1024.d0**3
     character(len=64) :: enabled
-    character(len=8) :: lev
-    integer :: k0, stat
+    integer :: k0
 #ifdef _OPENACC
     want_fock = acc_fock_mode() > 0
     want_diagg = acc_diagg_mode() > 0
@@ -493,14 +766,8 @@ contains
 ! Levels (module header): 1 everything; 2 d,d pairs on the CPU; 3 all d pairs on the CPU; 4 no
 ! density; 5 Fock only; 6 nothing. Level 1 is chosen here only if the d,d reservation is already
 ! held; otherwise it is decided after the first Fock builds (acc_dd_decide).
-! MOPAC_ACC_MEM_LEVEL (testing) starts the search at the given level (1 forces the d,d kernel).
     k0 = 2
     if (npair_dd > 0 .and. lmem_held >= lmem_dd) k0 = 1
-    call get_environment_variable("MOPAC_ACC_MEM_LEVEL", lev, status=stat)
-    if (stat == 0) then
-      read (lev, *, iostat=stat) k0
-      if (stat /= 0 .or. k0 < 1 .or. k0 > 6) k0 = 1
-    end if
     do k = k0, 6
       f = want_fock .and. k <= 5
       ddg = f .and. npair_dd > 0 .and. k == 1
@@ -515,7 +782,18 @@ contains
     allow_sdgpu = sdg
     allow_ddgpu = ddg
     plan_headroom = headroom
-    dd_pending = k == 2 .and. k0 == 2 .and. stat /= 0 .and. npair_dd > 0 .and. allow_sdgpu
+    path_want_f = want_fock
+    path_want_g = want_diagg
+    path_want_d = want_dens
+    path_nsd = int(npair_sd)
+    path_ndd = int(npair_dd)
+    path_mem = ''
+    if (k > max(k0, 2) .or. (k == 2 .and. k0 == 1)) then
+      f = want_fock; g = want_diagg; d = want_dens; sdg = f .and. npair_sd > 0; ddg = f .and. npair_dd > 0
+      write (path_mem, '(a,f0.2,a,f0.2,a)') 'device memory: ', dble(need())/gb, ' GB needed for all GPU paths, ', &
+        dble(max(0_8, avail - headroom))/gb, ' GB available'
+    end if
+    dd_pending = k == 2 .and. k0 == 2 .and. npair_dd > 0 .and. allow_sdgpu
     t_dd_cpu = -1.d0
     t_sd_gpu = -1.d0
     t_iter = -1.d0
@@ -533,21 +811,24 @@ contains
     if (allow_diagg) enabled = trim(enabled)//' DIAGG1'
     if (allow_dens) enabled = trim(enabled)//' density'
     if (len_trim(enabled) == 0) enabled = ' none (all on the CPU)'
-    write (iw, '(a,f7.3,a,f7.3,a)', advance='no') ' ACC MOZYME: device memory free ', dble(free)/gb, ' of ', &
-      dble(total)/gb, ' GB'
-    if (limit >= 0) write (iw, '(a,f7.3,a)', advance='no') ' (MOPAC_ACC_MEM_LIMIT ', dble(limit)/gb, ' GB)'
-    if (stat == 0) write (iw, '(a,i0,a)', advance='no') ' (MOPAC_ACC_MEM_LEVEL ', k0, ')'
-    write (iw, '(a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,i0,a)') '; needed (GB): Fock ', &
-      dble(b_nij + b_fp + b_lists + lmem_sp)/gb, ', +s,p-d pairs ', dble(lmem_sd - lmem_sp)/gb, ', +d,d pairs ', &
-      dble(lmem_dd - lmem_sd)/gb, ', +DIAGG1 ', dble(b_cand + b_lmo_g)/gb, ', +density ', dble(b_pacc + b_lmo_d)/gb, &
-      ', headroom ', dble(headroom)/gb, ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
-    write (iw, '(a,i0,a,i0,a,i0)', advance='no') ' ACC MOZYME: NDDO pairs ', npair, ', of which s,p-d ', npair_sd, &
-      ', d,d ', npair_dd
-    if (dd_pending) write (iw, '(a)', advance='no') &
-      ' (d,d pairs on the CPU; moved to the GPU after the first Fock builds if that pays)'
-    write (iw, '(a)') ''
-    write (iw, '(a,i0,2a)') ' ACC MOZYME: level ', k, '; GPU paths enabled:', trim(enabled)
-    flush (iw)
+    path_planned = .true.
+    call acc_path_update('')
+    if (acc_report()) then
+      write (iw, '(a,f7.3,a,f7.3,a)', advance='no') ' ACC MOZYME: device memory free ', dble(free)/gb, ' of ', &
+        dble(total)/gb, ' GB'
+      if (limit >= 0) write (iw, '(a,f7.3,a)', advance='no') ' (MOPAC_ACC_MEM_LIMIT ', dble(limit)/gb, ' GB)'
+      write (iw, '(a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,i0,a)') '; needed (GB): Fock ', &
+        dble(b_nij + b_fp + b_lists + lmem_sp)/gb, ', +s,p-d pairs ', dble(lmem_sd - lmem_sp)/gb, ', +d,d pairs ', &
+        dble(lmem_dd - lmem_sd)/gb, ', +DIAGG1 ', dble(b_cand + b_lmo_g)/gb, ', +density ', dble(b_pacc + b_lmo_d)/gb, &
+        ', headroom ', dble(headroom)/gb, ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
+      write (iw, '(a,i0,a,i0,a,i0)', advance='no') ' ACC MOZYME: NDDO pairs ', npair, ', of which s,p-d ', npair_sd, &
+        ', d,d ', npair_dd
+      if (dd_pending) write (iw, '(a)', advance='no') &
+        ' (d,d pairs on the CPU; moved to the GPU after the first Fock builds if that pays)'
+      write (iw, '(a)') ''
+      write (iw, '(a,i0,2a)') ' ACC MOZYME: level ', k, '; GPU paths enabled:', trim(enabled)
+      flush (iw)
+    end if
 #endif
   contains
     integer(8) function need()
@@ -573,6 +854,8 @@ contains
     integer, intent(in) :: nsd, ndd
     double precision :: est, saving
     integer(8) :: free, need
+    logical :: rep
+    character(len=200) :: msg
     if (t_dd_cpu < 0.d0 .or. t_iter <= 0.d0) return        ! not measured yet
     if (nsd > 0 .and. t_sd_gpu < 0.d0) return
     dd_pending = .false.
@@ -581,18 +864,26 @@ contains
     saving = t_dd_cpu - est
     need = max(0_8, lmem_dd - lmem_held)
     free = acc_free_memory()
-    write (iw, '(a,f8.4,a,f8.4,a,f8.3,a)', advance='no') ' ACC MOZYME: d,d pairs: CPU ', t_dd_cpu, &
+    rep = acc_report()
+    if (rep) write (iw, '(a,f8.4,a,f8.4,a,f8.3,a)', advance='no') ' ACC MOZYME: d,d pairs: CPU ', t_dd_cpu, &
       ' s per Fock build, GPU (estimated) ', est, ' s, SCF iteration ', t_iter, ' s'
     if (saving <= f_dd*t_iter) then
-      write (iw, '(a)') '; stay on the CPU (saving under 5 % of an iteration)'
+      if (rep) write (iw, '(a)') '; stay on the CPU (saving under 5 % of an iteration)'
+      write (msg, '(a,f0.4,a,f0.4,a)') 'kept there: ', t_dd_cpu, &
+        ' s per Fock build on the CPU, under 5 % of an SCF iteration (', t_iter, ' s)'
     else if (free - need < plan_headroom) then
-      write (iw, '(a,f6.2,a,f6.2,a)') '; would pay, but the kernel reservation (', dble(need)/1024.d0**3, &
+      if (rep) write (iw, '(a,f6.2,a,f6.2,a)') '; would pay, but the kernel reservation (', dble(need)/1024.d0**3, &
         ' GB) does not fit (free ', dble(free)/1024.d0**3, ' GB): stay on the CPU'
+      write (msg, '(a,f0.2,a,f0.2,a)') 'kept there: their GPU kernel needs ', dble(need)/1024.d0**3, &
+        ' GB of device memory, ', dble(free)/1024.d0**3, ' GB free'
     else
       allow_ddgpu = .true.
-      write (iw, '(a,f6.2,a)') '; moved to the GPU (reservation ', dble(need)/1024.d0**3, ' GB)'
+      if (rep) write (iw, '(a,f6.2,a)') '; moved to the GPU (reservation ', dble(need)/1024.d0**3, ' GB)'
+      write (msg, '(a,f0.4,a,f0.4,a)') 'from the next Fock build; d,d NDDO pairs moved to the GPU (CPU ', t_dd_cpu, &
+        ' s per Fock build, GPU estimated ', est, ' s)'
     end if
-    flush (iw)
+    if (rep) flush (iw)
+    call acc_path_update(trim(msg))
   end subroutine acc_dd_decide
 
   subroutine acc_lmem_begin(predicted, free0)
@@ -615,7 +906,7 @@ contains
     if (free0 < 0) return
     drop = free0 - acc_free_memory()
     expect = predicted - lmem_held
-    write (iw, '(3a,f6.2,a,f6.2,a)') ' ACC MOZYME: ', what, ' kernel stack reservation: predicted ', &
+    if (acc_report()) write (iw, '(3a,f6.2,a,f6.2,a)') ' ACC MOZYME: ', what, ' kernel stack reservation: predicted ', &
       dble(expect)/1024.d0**3, ' GB, measured ', dble(drop)/1024.d0**3, ' GB'
     if (abs(dble(drop) - dble(expect)) > 0.1d0*dble(expect)) write (iw, '(3a)') &
       ' ACC MOZYME: WARNING: the stack reservation differs from the prediction by more than 10 %; update the ', &
@@ -692,7 +983,6 @@ contains
     integer :: k, which, stat
     type(c_ptr) :: h, base
     type(c_funptr) :: fp1, fp2
-    character(len=8) :: env
     if (bytes < 16_8*1024_8**2) return
     lo = transfer(p, 0_c_intptr_t)
     hi = lo + bytes
@@ -701,8 +991,6 @@ contains
     end do
     if (pin_state == 0) then
       pin_state = -1
-      call get_environment_variable("MOPAC_ACC_PIN", env, status=stat)
-      if (stat == 0 .and. trim(env) == '0') return
       h = c_dlopen('libcuda.so.1'//c_null_char, 2_c_int)        ! RTLD_NOW
       if (.not. c_associated(h)) return
       fp1 = c_dlsym(h, 'cuMemHostRegister_v2'//c_null_char)
@@ -757,7 +1045,7 @@ contains
     pin_ptr(pin_n) = base
     pin_lo(pin_n) = alo
     pin_hi(pin_n) = ahi
-    if (.not. pin_said(which)) then
+    if (.not. pin_said(which) .and. acc_report()) then
       write (iw, '(a,a,f8.3,a,f7.3,a)') ' ACC MOZYME: page-locked host array ', merge('f', merge('p', 'h', which == 2), &
         which == 1), dble(ahi - alo)/1024.d0**3, ' GB for device transfers (', dble(tc1 - tc0)/dble(trate), ' s)'
       pin_said(which) = .true.
@@ -810,25 +1098,10 @@ contains
 end module acc_mozyme_C
 
 integer function acc_fock_mode()
+! Mode of the GPU Fock build (acc_gpu_mode): 0 CPU, 1 GPU, 2 both, compared (MOPAC_ACC_FOCK=test).
+  use acc_mozyme_C, only : acc_gpu_mode
   implicit none
-  integer, save :: mode = -1
-#ifdef _OPENACC
-  character(len=16) :: env
-  integer :: stat
-  if (mode < 0) then
-    call get_environment_variable("MOPAC_ACC_FOCK", env, status=stat)
-    if (stat /= 0) then
-      mode = 0
-    else if (trim(env) == 'test') then
-      mode = 2
-    else
-      mode = 1
-    end if
-  end if
-#else
-  mode = 0
-#endif
-  acc_fock_mode = mode
+  acc_fock_mode = acc_gpu_mode("MOPAC_ACC_FOCK")
 end function acc_fock_mode
 
 subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepare, supported)
@@ -842,7 +1115,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
-  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
+  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, acc_path_note, acc_report, &
     fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_sdgpu, allow_ddgpu, n_sdpairs, &
     n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end, &
     dd_pending, t_iter, t_last_build, t_sd_gpu, acc_dd_decide, acc_sp_order, &
@@ -1004,7 +1277,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
       dtmp(dpj(kd)) = dtmp(dpj(kd)) + 1
     end do
     deallocate (dtmp)
-    if (unsupported) write (iw, '(a)') ' ACC FOCK: NDDO pairs of an unsupported kind; the GPU Fock build is not used'
+    if (unsupported) call acc_path_note('Fock build (NDDO pairs of a kind the GPU code does not handle)')
     !$acc enter data copyin(ta, tb, tstart, tlist, spos, sord, dpi, dpj, dcls, isd, idd, dstart, dlist) create(part, cdi, cdj)
     n_sdpairs = nsd
     n_ddpairs = ndd
@@ -1031,7 +1304,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   end if
   if (p_reuse) then
     nreuse = nreuse + 1
-    if (nreuse == 1) write (iw, '(a)') ' ACC FOCK: using the device copy of P from the GPU density build'
+    if (nreuse == 1 .and. acc_report()) write (iw, '(a)') ' ACC FOCK: using the device copy of P from the GPU density build'
   else
     call acc_to_device(pd_c, ptot, mpack)
   end if
@@ -1780,7 +2053,7 @@ logical function acc_helecz(ee)
   use molkst_C, only : numat, mpack
   use MOZYME_C, only : iorbs, lijbo
   use common_arrays_C, only : h
-  use acc_mozyme_C, only : acc_mozyme_sync, acc_mozyme_hbuf, acc_to_device, acc_matches_device, nij, fd_c, pd_c, &
+  use acc_mozyme_C, only : acc_report, acc_mozyme_sync, acc_mozyme_hbuf, acc_to_device, acc_matches_device, nij, fd_c, pd_c, &
     hd_c, fd_ok, pd_ok, hd_ok
   use iso_c_binding, only : c_f_pointer
   use chanel_C, only : iw
@@ -1831,7 +2104,7 @@ logical function acc_helecz(ee)
   acc_helecz = .true.
   if (check) then
     eh = helecz()
-    write (iw, '(a,es24.16,a,es10.3,a)') ' ACC HELECZ: GPU ', ee, ' eV, |GPU - CPU| ', abs(ee - eh), ' eV'
+    if (acc_report()) write (iw, '(a,es24.16,a,es10.3,a)') ' ACC HELECZ: GPU ', ee, ' eV, |GPU - CPU| ', abs(ee - eh), ' eV'
     if (abs(ee - eh) > 1.d-9*max(1.d0, abs(eh))) write (iw, '(a)') &
       ' ACC HELECZ: WARNING: the GPU and CPU electronic energies differ by more than 1e-9 (relative)'
     flush (iw)
