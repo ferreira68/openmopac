@@ -183,6 +183,6 @@ subroutine acc_density_compare(p, pg, tg)
   do i = 1, mpack
     d = max(d, abs(p(i) - pg(i)))
   end do
-  write (iw, '(a,es10.3,a,f8.3,a)') ' ACC DENS TEST: max |P(CPU) - P(GPU)| ', d, ';  GPU ', tg, ' s'
+  write (iw, '(a,es10.3,a,f8.3,a)') ' MOPAC GPU density test: max |P(CPU) - P(GPU)| ', d, ';  GPU ', tg, ' s'
   flush (iw)
 end subroutine acc_density_compare

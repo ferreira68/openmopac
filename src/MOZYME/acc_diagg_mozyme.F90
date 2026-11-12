@@ -109,7 +109,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
       if (eimp_dev .and. .not. (fstale .or. pstale)) call acc_eimp_kernel(numat, mpack, fdev, pdev, nij_d, iorbs)
       if (fstale .or. pstale) then
         nstale = nstale + 1
-        if (nstale <= 20) write (iw, '(a,i0,a,l2,a,l2)') ' ACC DIAGG: device copy stale (occurrence ', nstale, &
+        if (nstale <= 20) write (iw, '(a,i0,a,l2,a,l2)') ' MOPAC GPU DIAGG1: device copy stale (occurrence ', nstale, &
           '): F', fstale, '  P', pstale
         fd_ok = .false.
       end if
@@ -132,7 +132,8 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     end if
   else
     nreuse = nreuse + 1
-    if (nreuse == 1 .and. acc_report()) write (iw, '(a)') ' ACC DIAGG: using the device copies of F and P from the GPU Fock build'
+    if (nreuse == 1 .and. acc_report()) write (iw, '(a)') &
+      ' MOPAC GPU DIAGG1: using the device copies of F and P from the GPU Fock build'
   end if
   call c_f_pointer(fd_c, fdev, [mpack])
   call c_f_pointer(pd_c, pdev, [mpack])
@@ -155,7 +156,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
     cutoff, flim, full, docc, cap, ci, cj, cl, cv, ncand, eigv, eigs_occ, nlist, ifmo_in, fmo, fmo_dim, sumt, tiny)
   if (.not. full .or. ncand <= cap) exit
 ! More candidates than buffer space: enlarge the buffer and repeat once.
-  write (iw, '(a,i0,a,i0,a)') ' ACC DIAGG: ', ncand, ' candidate pairs exceed the buffer (', cap, '); enlarging it'
+  write (iw, '(a,i0,a,i0,a)') ' MOPAC GPU DIAGG1: ', ncand, ' candidate pairs exceed the buffer (', cap, '); enlarging it'
   cap = ncand + ncand/4
   end do
 ! The density changes after diagg1 (diagg2, density_for_MOZYME): the buffers are no longer current.
@@ -163,7 +164,7 @@ subroutine acc_diagg1_core(fao, nocc, nvir, eigv, eigs_occ, nfmo_out, ifmo, ifmo
   pd_ok = .false.
   if (full) then
     if (ncand > cap) then
-      write (iw, '(a)') ' ACC DIAGG: candidate buffer still too small; this DIAGG1 call runs on the CPU'
+      write (iw, '(a)') ' MOPAC GPU DIAGG1: candidate buffer still too small; this DIAGG1 call runs on the CPU'
       ok = .false.
       call acc_eimp_host_fallback()
       return
@@ -672,7 +673,7 @@ subroutine acc_diagg1_compare(nvir, nocc, eigv, eigvg, eigso, eigsg, docc, ijc, 
     if (ifmo(1, k) /= ifmog(1, k) .or. ifmo(2, k) /= ifmog(2, k)) nbad = nbad + 1
     df = max(df, abs(fmo(k) - fmog(k)))
   end do
-  write (iw, '(a,es9.2,a,es9.2,a,es9.2,a,i0,a,i0,a,i0,a,es9.2,a,es9.2,a,f7.3,a)') ' ACC DIAGG TEST: max |d eigv| ', dv, &
+  write (iw, '(a,es9.2,a,es9.2,a,es9.2,a,i0,a,i0,a,i0,a,es9.2,a,es9.2,a,f7.3,a)') ' MOPAC GPU DIAGG1 test: max |d eigv| ', dv, &
     '  |d eigs| ', dso, '  |d fmo| ', df, '  ijc ', ijc, '/', ijcg, '  list mismatches ', nbad, '  d sumt ', abs(sumt - sumtg), &
     '  d tiny ', abs(tiny - tinyg), '  GPU ', tg, ' s'
   flush (iw)

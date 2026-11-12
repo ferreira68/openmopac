@@ -308,7 +308,7 @@ contains
     if (.not. c_associated(pacc_c)) then
       pacc_c = c_null_ptr
       allow_dens = .false.
-      write (iw, '(a)') ' ACC MOZYME: device memory exhausted allocating the density accumulator; density on the CPU'
+      write (iw, '(a)') ' MOPAC GPU: device memory exhausted allocating the density accumulator; density on the CPU'
       acc_mozyme_pacc = .false.
       return
     end if
@@ -331,7 +331,7 @@ contains
     hd_c = c_acc_malloc(int(n, c_long_long)*8_c_long_long)
     if (.not. c_associated(hd_c)) then
       hd_c = c_null_ptr
-      write (iw, '(a)') ' ACC MOZYME: device memory exhausted allocating the copy of H; HELECZ on the CPU'
+      write (iw, '(a)') ' MOPAC GPU: device memory exhausted allocating the copy of H; HELECZ on the CPU'
       acc_mozyme_hbuf = .false.
       return
     end if
@@ -349,7 +349,7 @@ contains
     allow_fock = .false.
     allow_diagg = .false.
     allow_dens = .false.
-    write (iw, '(3a)') ' ACC MOZYME: device memory exhausted ', what, '; MOZYME continues on the CPU'
+    write (iw, '(3a)') ' MOPAC GPU: device memory exhausted ', what, '; MOZYME continues on the CPU'
     call acc_path_update('device memory exhausted '//what)
 #endif
   end subroutine acc_mozyme_give_up
@@ -814,19 +814,19 @@ contains
     path_planned = .true.
     call acc_path_update('')
     if (acc_report()) then
-      write (iw, '(a,f7.3,a,f7.3,a)', advance='no') ' ACC MOZYME: device memory free ', dble(free)/gb, ' of ', &
+      write (iw, '(a,f7.3,a,f7.3,a)', advance='no') ' MOPAC GPU: device memory free ', dble(free)/gb, ' of ', &
         dble(total)/gb, ' GB'
       if (limit >= 0) write (iw, '(a,f7.3,a)', advance='no') ' (MOPAC_ACC_MEM_LIMIT ', dble(limit)/gb, ' GB)'
       write (iw, '(a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,f7.3,a,i0,a)') '; needed (GB): Fock ', &
         dble(b_nij + b_fp + b_lists + lmem_sp)/gb, ', +s,p-d pairs ', dble(lmem_sd - lmem_sp)/gb, ', +d,d pairs ', &
         dble(lmem_dd - lmem_sd)/gb, ', +DIAGG1 ', dble(b_cand + b_lmo_g)/gb, ', +density ', dble(b_pacc + b_lmo_d)/gb, &
         ', headroom ', dble(headroom)/gb, ', available ', dble(avail)/gb, ' (', slots, ' thread slots)'
-      write (iw, '(a,i0,a,i0,a,i0)', advance='no') ' ACC MOZYME: NDDO pairs ', npair, ', of which s,p-d ', npair_sd, &
+      write (iw, '(a,i0,a,i0,a,i0)', advance='no') ' MOPAC GPU: NDDO pairs ', npair, ', of which s,p-d ', npair_sd, &
         ', d,d ', npair_dd
       if (dd_pending) write (iw, '(a)', advance='no') &
         ' (d,d pairs on the CPU; moved to the GPU after the first Fock builds if that pays)'
       write (iw, '(a)') ''
-      write (iw, '(a,i0,2a)') ' ACC MOZYME: level ', k, '; GPU paths enabled:', trim(enabled)
+      write (iw, '(a,i0,2a)') ' MOPAC GPU: level ', k, '; GPU paths enabled:', trim(enabled)
       flush (iw)
     end if
 #endif
@@ -865,7 +865,7 @@ contains
     need = max(0_8, lmem_dd - lmem_held)
     free = acc_free_memory()
     rep = acc_report()
-    if (rep) write (iw, '(a,f8.4,a,f8.4,a,f8.3,a)', advance='no') ' ACC MOZYME: d,d pairs: CPU ', t_dd_cpu, &
+    if (rep) write (iw, '(a,f8.4,a,f8.4,a,f8.3,a)', advance='no') ' MOPAC GPU: d,d pairs: CPU ', t_dd_cpu, &
       ' s per Fock build, GPU (estimated) ', est, ' s, SCF iteration ', t_iter, ' s'
     if (saving <= f_dd*t_iter) then
       if (rep) write (iw, '(a)') '; stay on the CPU (saving under 5 % of an iteration)'
@@ -906,10 +906,10 @@ contains
     if (free0 < 0) return
     drop = free0 - acc_free_memory()
     expect = predicted - lmem_held
-    if (acc_report()) write (iw, '(3a,f6.2,a,f6.2,a)') ' ACC MOZYME: ', what, ' kernel stack reservation: predicted ', &
+    if (acc_report()) write (iw, '(3a,f6.2,a,f6.2,a)') ' MOPAC GPU: ', what, ' kernel stack reservation: predicted ', &
       dble(expect)/1024.d0**3, ' GB, measured ', dble(drop)/1024.d0**3, ' GB'
-    if (abs(dble(drop) - dble(expect)) > 0.1d0*dble(expect)) write (iw, '(3a)') &
-      ' ACC MOZYME: WARNING: the stack reservation differs from the prediction by more than 10 %; update the ', &
+    if (acc_report() .and. abs(dble(drop) - dble(expect)) > 0.1d0*dble(expect)) write (iw, '(3a)') &
+      ' MOPAC GPU: WARNING: the stack reservation differs from the prediction by more than 10 %; update the ', &
       what, ' stack constant'
     lmem_held = predicted
   end subroutine acc_lmem_end
@@ -1028,7 +1028,7 @@ contains
     if (which == 0) return
     do k = 1, pin_n                     ! cannot happen while the arrays are not freed within the scope
       if (alo < pin_hi(k) .and. ahi > pin_lo(k)) then
-        write (iw, '(a)') ' ACC MOZYME: pinned host ranges overlap; pinning stopped'
+        write (iw, '(a)') ' MOPAC GPU: pinned host ranges overlap; pinning stopped'
         pin_state = -1
         return
       end if
@@ -1037,7 +1037,7 @@ contains
     stat = pin_reg(base, int(ahi - alo, c_size_t), 1_c_int)    ! CU_MEMHOSTREGISTER_PORTABLE
     call system_clock(tc1)
     if (stat /= 0) then
-      write (iw, '(a,i0,a)') ' ACC MOZYME: cuMemHostRegister failed (CUresult ', stat, '); transfers stay pageable'
+      write (iw, '(a,i0,a)') ' MOPAC GPU: cuMemHostRegister failed (CUresult ', stat, '); transfers stay pageable'
       pin_state = -1
       return
     end if
@@ -1046,7 +1046,7 @@ contains
     pin_lo(pin_n) = alo
     pin_hi(pin_n) = ahi
     if (.not. pin_said(which) .and. acc_report()) then
-      write (iw, '(a,a,f8.3,a,f7.3,a)') ' ACC MOZYME: page-locked host array ', merge('f', merge('p', 'h', which == 2), &
+      write (iw, '(a,a,f8.3,a,f7.3,a)') ' MOPAC GPU: page-locked host array ', merge('f', merge('p', 'h', which == 2), &
         which == 1), dble(ahi - alo)/1024.d0**3, ' GB for device transfers (', dble(tc1 - tc0)/dble(trate), ' s)'
       pin_said(which) = .true.
     end if
@@ -1115,7 +1115,8 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
 #ifdef _OPENACC
   use molkst_C, only : numat, mpack
   use parameters_C, only : dorbs, iod
-  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, acc_path_note, acc_report, &
+  use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
+    acc_path_note, acc_report, &
     fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_sdgpu, allow_ddgpu, n_sdpairs, &
     n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end, &
     dd_pending, t_iter, t_last_build, t_sd_gpu, acc_dd_decide, acc_sp_order, &
@@ -1300,11 +1301,11 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   p_reuse = .false.
   if (p_on_device .and. allocated(pcom)) then
     if (loc(ptot(1)) == loc(pcom(1))) p_reuse = acc_matches_device(pd_c, ptot, mpack, 0.d0)
-    if (.not. p_reuse) write (iw, '(a)') ' ACC FOCK: device copy of P was stale; copied again'
+    if (.not. p_reuse) write (iw, '(a)') ' MOPAC GPU Fock: device copy of P was stale; copied again'
   end if
   if (p_reuse) then
     nreuse = nreuse + 1
-    if (nreuse == 1 .and. acc_report()) write (iw, '(a)') ' ACC FOCK: using the device copy of P from the GPU density build'
+    if (nreuse == 1 .and. acc_report()) write (iw, '(a)') ' MOPAC GPU Fock: using the device copy of P from the GPU density build'
   else
     call acc_to_device(pd_c, ptot, mpack)
   end if
@@ -1978,7 +1979,7 @@ subroutine acc_fock_compare(f, fg, tg)
     end if
     fmax = max(fmax, abs(f(i)))
   end do
-  write (iw, '(a,es10.3,a,i0,a,es10.3,a,f8.3,a)') ' ACC FOCK TEST: max |F(CPU) - F(GPU)| ', dmax, ' eV at ', imax, &
+  write (iw, '(a,es10.3,a,i0,a,es10.3,a,f8.3,a)') ' MOPAC GPU Fock test: max |F(CPU) - F(GPU)| ', dmax, ' eV at ', imax, &
     ' (max |F| ', fmax, ');  GPU part ', tg, ' s'
   flush (iw)
 end subroutine acc_fock_compare
@@ -1986,10 +1987,15 @@ end subroutine acc_fock_compare
 subroutine acc_h_invalidate()
 ! Called at every entry to iter_for_MOZYME: h may have changed since the last SCF (new geometry,
 ! hcore_for_MOZYME, addhcr, add_more_interactions), so the device copy is refreshed on next use.
+! The device copies of F and P are dropped too: between SCFs (geometry steps, LOCATE-TS, gradients)
+! the host P is rewritten by code that does not clear pd_ok, and the sampled check in acc_fz2n
+! cannot prove equality.
 #ifdef _OPENACC
-  use acc_mozyme_C, only : hd_ok, eimp_dev
+  use acc_mozyme_C, only : hd_ok, eimp_dev, fd_ok, pd_ok
   hd_ok = .false.
   eimp_dev = .false.
+  fd_ok = .false.
+  pd_ok = .false.
 #endif
 end subroutine acc_h_invalidate
 
@@ -2079,7 +2085,7 @@ logical function acc_helecz(ee)
   if (hd_ok) then
     if (.not. acc_matches_device(hd_c, h, mpack, 0.d0)) then
       nstale = nstale + 1
-      if (nstale <= 20) write (iw, '(a)') ' ACC HELECZ: device copy of H was stale; copied again'
+      if (nstale <= 20) write (iw, '(a)') ' MOPAC GPU energy: device copy of H was stale; copied again'
       hd_ok = .false.
     end if
   end if
@@ -2104,9 +2110,9 @@ logical function acc_helecz(ee)
   acc_helecz = .true.
   if (check) then
     eh = helecz()
-    if (acc_report()) write (iw, '(a,es24.16,a,es10.3,a)') ' ACC HELECZ: GPU ', ee, ' eV, |GPU - CPU| ', abs(ee - eh), ' eV'
+    if (acc_report()) write (iw, '(a,es24.16,a,es10.3,a)') ' MOPAC GPU energy: GPU ', ee, ' eV, |GPU - CPU| ', abs(ee - eh), ' eV'
     if (abs(ee - eh) > 1.d-9*max(1.d0, abs(eh))) write (iw, '(a)') &
-      ' ACC HELECZ: WARNING: the GPU and CPU electronic energies differ by more than 1e-9 (relative)'
+      ' MOPAC GPU energy: WARNING: the GPU and CPU electronic energies differ by more than 1e-9 (relative)'
     flush (iw)
   end if
 #else
