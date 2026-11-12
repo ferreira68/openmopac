@@ -70,6 +70,7 @@ subroutine iter_for_MOZYME (ee)
     add_niter = 0
     tstart = seconds(1)
     call acc_h_invalidate()   ! h may have changed since the last SCF: refresh its device copy on next use
+    call acc_pin_begin()      ! transfers may page-lock common f, p, h until acc_pin_end (after every call)
 !
         80  continue
     if (nmol /= numcal) then

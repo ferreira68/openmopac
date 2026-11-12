@@ -106,6 +106,7 @@
             if (moperr) return
             aa = 0.d0
             call iter_for_MOZYME (aa)
+            call acc_pin_end()   ! unpin host arrays pinned for GPU transfers
           else
             call hcore ()
             call iter (aa, .TRUE., .TRUE.)
@@ -150,6 +151,7 @@
               call hcore_for_MOZYME ()
               if (moperr) return
               call iter_for_MOZYME (aa)
+              call acc_pin_end()   ! unpin host arrays pinned for GPU transfers
             else
               call hcore ()
               call iter (aa, .TRUE., .TRUE.)
@@ -179,6 +181,7 @@
             call hcore_for_MOZYME ()
             if (moperr) return
             call iter_for_MOZYME (ee)
+            call acc_pin_end()   ! unpin host arrays pinned for GPU transfers
           else
             call hcore ()
             call iter (ee, .TRUE., .TRUE.)

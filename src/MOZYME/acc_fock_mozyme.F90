@@ -154,7 +154,35 @@ module acc_mozyme_C
       integer(c_int) :: pi
       integer(c_int), value :: attrib, device
     end function cu_device_get_attribute
+    integer(c_int) function cu_host_register(p, bytes, flags) bind(C)  ! cuMemHostRegister(void*, size_t, unsigned)
+      import :: c_int, c_ptr, c_size_t
+      type(c_ptr), value :: p
+      integer(c_size_t), value :: bytes
+      integer(c_int), value :: flags
+    end function cu_host_register
+    integer(c_int) function cu_host_unregister(p) bind(C)              ! cuMemHostUnregister(void*)
+      import :: c_int, c_ptr
+      type(c_ptr), value :: p
+    end function cu_host_unregister
   end interface
+! Page-locked (pinned) host arrays. The host copies of F, P and H (common_arrays f, p, h; 611 MB each
+! for whole PTP1B at CUTOFF=100) are copied to or from the device on every SCF iteration. From pageable
+! memory the driver stages each copy through a bounce buffer (about 7 GB/s, RTX 5090 Laptop); pinned,
+! the copy is a direct DMA. acc_to_device / acc_from_device pin a common array on its first transfer
+! while pin_scope is set, that is, during one iter_for_MOZYME call (acc_pin_begin at its entry,
+! acc_pin_end after every call). Within an SCF these arrays are never reallocated (they are only
+! reallocated in setup_mopac_arrays, set_up_MOZYME_arrays, add_more_interactions (from hcore) and
+! writmo); a pinned range must be unpinned before it is freed, because a new array at the same address
+! would otherwise be read through the old, still-locked pages. Only common f, p and h are pinned.
+! MOPAC_ACC_PIN=0 disables pinning.
+  integer, parameter :: pin_max = 4
+  logical :: pin_scope = .false.
+  integer :: pin_n = 0, pin_state = 0        ! pin_state: 0 not initialized, 1 available, -1 unavailable
+  type(c_ptr) :: pin_ptr(pin_max)
+  integer(8) :: pin_lo(pin_max) = 0, pin_hi(pin_max) = 0
+  logical :: pin_said(3) = .false.          ! the first pinning of f, p, h is reported
+  procedure(cu_host_register), pointer :: pin_reg => null()
+  procedure(cu_host_unregister), pointer :: pin_unreg => null()
 contains
   logical function acc_sp_atom(z, io)
 ! An atom (atomic number z, io orbitals) with an s or s,p basis and no d-orbital terms.
@@ -635,6 +663,7 @@ contains
     integer, intent(in) :: n
     double precision, intent(in), target :: a(n)
 #ifdef _OPENACC
+    if (pin_scope) call acc_pin(c_loc(a), int(n, 8)*8_8)
     call c_acc_memcpy_to_device(dev, c_loc(a), int(n, c_long_long)*8_c_long_long)
 #endif
   end subroutine acc_to_device
@@ -645,9 +674,110 @@ contains
     integer, intent(in) :: n
     double precision, intent(inout), target :: a(n)
 #ifdef _OPENACC
+    if (pin_scope) call acc_pin(c_loc(a), int(n, 8)*8_8)
     call c_acc_memcpy_from_device(c_loc(a), dev, int(n, c_long_long)*8_c_long_long)
 #endif
   end subroutine acc_from_device
+
+  subroutine acc_pin(p, bytes)
+! Pins the whole common array (f, p or h) that holds the host range [p, p+bytes), unless it is
+! pinned already, the range is in none of them, or it is smaller than 16 MB (see pin_scope).
+    use iso_c_binding, only : c_intptr_t, c_associated, c_f_procpointer, c_null_char, c_loc
+    use common_arrays_C, only : fcom => f, pcom => p, hcom => h
+    use chanel_C, only : iw
+    type(c_ptr), intent(in) :: p
+    integer(8), intent(in) :: bytes
+#ifdef _OPENACC
+    integer(8) :: lo, hi, alo, ahi, tc0, tc1, trate
+    integer :: k, which, stat
+    type(c_ptr) :: h, base
+    type(c_funptr) :: fp1, fp2
+    character(len=8) :: env
+    if (bytes < 16_8*1024_8**2) return
+    lo = transfer(p, 0_c_intptr_t)
+    hi = lo + bytes
+    do k = 1, pin_n
+      if (lo >= pin_lo(k) .and. hi <= pin_hi(k)) return
+    end do
+    if (pin_state == 0) then
+      pin_state = -1
+      call get_environment_variable("MOPAC_ACC_PIN", env, status=stat)
+      if (stat == 0 .and. trim(env) == '0') return
+      h = c_dlopen('libcuda.so.1'//c_null_char, 2_c_int)        ! RTLD_NOW
+      if (.not. c_associated(h)) return
+      fp1 = c_dlsym(h, 'cuMemHostRegister_v2'//c_null_char)
+      fp2 = c_dlsym(h, 'cuMemHostUnregister'//c_null_char)
+      if (.not. c_associated(fp1) .or. .not. c_associated(fp2)) return
+      call c_f_procpointer(fp1, pin_reg)
+      call c_f_procpointer(fp2, pin_unreg)
+      pin_state = 1
+    end if
+    if (pin_state /= 1 .or. pin_n >= pin_max) return
+    which = 0
+    alo = 0
+    ahi = 0
+    do k = 1, 3
+      if (k == 1 .and. allocated(fcom)) then
+        alo = loc(fcom(1))               ! loc: the common arrays have no TARGET attribute
+        base = transfer(int(alo, c_intptr_t), base)
+        ahi = alo + 8_8*size(fcom, kind=8)
+      else if (k == 2 .and. allocated(pcom)) then
+        alo = loc(pcom(1))               ! loc: the common arrays have no TARGET attribute
+        base = transfer(int(alo, c_intptr_t), base)
+        ahi = alo + 8_8*size(pcom, kind=8)
+      else if (k == 3 .and. allocated(hcom)) then
+        alo = loc(hcom(1))               ! loc: the common arrays have no TARGET attribute
+        base = transfer(int(alo, c_intptr_t), base)
+        ahi = alo + 8_8*size(hcom, kind=8)
+      else
+        cycle
+      end if
+      if (lo >= alo .and. hi <= ahi) then
+        which = k
+        exit
+      end if
+    end do
+    if (which == 0) return
+    do k = 1, pin_n                     ! cannot happen while the arrays are not freed within the scope
+      if (alo < pin_hi(k) .and. ahi > pin_lo(k)) then
+        write (iw, '(a)') ' ACC MOZYME: pinned host ranges overlap; pinning stopped'
+        pin_state = -1
+        return
+      end if
+    end do
+    call system_clock(tc0, trate)
+    stat = pin_reg(base, int(ahi - alo, c_size_t), 1_c_int)    ! CU_MEMHOSTREGISTER_PORTABLE
+    call system_clock(tc1)
+    if (stat /= 0) then
+      write (iw, '(a,i0,a)') ' ACC MOZYME: cuMemHostRegister failed (CUresult ', stat, '); transfers stay pageable'
+      pin_state = -1
+      return
+    end if
+    pin_n = pin_n + 1
+    pin_ptr(pin_n) = base
+    pin_lo(pin_n) = alo
+    pin_hi(pin_n) = ahi
+    if (.not. pin_said(which)) then
+      write (iw, '(a,a,f8.3,a,f7.3,a)') ' ACC MOZYME: page-locked host array ', merge('f', merge('p', 'h', which == 2), &
+        which == 1), dble(ahi - alo)/1024.d0**3, ' GB for device transfers (', dble(tc1 - tc0)/dble(trate), ' s)'
+      pin_said(which) = .true.
+    end if
+#endif
+  end subroutine acc_pin
+
+  subroutine acc_pin_release()
+! Unpins every pinned host range (end of the pin scope).
+    integer :: k, stat
+#ifdef _OPENACC
+    do k = 1, pin_n
+      stat = pin_unreg(pin_ptr(k))
+    end do
+#endif
+    pin_n = 0
+    pin_lo = 0
+    pin_hi = 0
+    pin_scope = .false.
+  end subroutine acc_pin_release
 
   logical function acc_mozyme_sync()
 ! Returns .true. if nij was (re)built on this call. Consumers that keep data derived from nij must
@@ -1589,6 +1719,20 @@ subroutine acc_h_invalidate()
   eimp_dev = .false.
 #endif
 end subroutine acc_h_invalidate
+
+subroutine acc_pin_begin()
+! Called at every entry to iter_for_MOZYME: transfers of common f, p, h may pin them (acc_pin) until
+! acc_pin_end, which every caller of iter_for_MOZYME calls after it returns.
+  use acc_mozyme_C, only : pin_scope, acc_pin_release
+  call acc_pin_release()
+  pin_scope = .true.
+end subroutine acc_pin_begin
+
+subroutine acc_pin_end()
+! Unpins the host arrays pinned during the last iter_for_MOZYME call (they may be freed after it).
+  use acc_mozyme_C, only : acc_pin_release
+  call acc_pin_release()
+end subroutine acc_pin_end
 
 logical function acc_eimp_skip()
 ! Called in place of the host eimp before diagg: .true. if the GPU diagg1 will run on the device copies

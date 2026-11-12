@@ -406,6 +406,7 @@
         if (norbs > 0 .and. nelecs > 0) then
           if (mozyme) then
             call iter_for_MOZYME (elect)
+            call acc_pin_end()   ! unpin host arrays pinned for GPU transfers
           else
             call iter (elect, fulscf, .TRUE.)
           end if
