@@ -163,6 +163,27 @@ contains
     acc_sp_atom = (io == 1 .or. io == 4) .and. .not. dorbs(z) .and. iod(z) == 0
   end function acc_sp_atom
 
+  subroutine acc_sp_order(numat, nat, iorbs, pos, ord, nsp)
+! Positions of the s,p atoms in the tiles of the GPU Fock build: heavy (s,p) atoms first, then
+! hydrogen-like (s) atoms, each in atom order, so that a tile pair holds pairs of one kind (heavy-heavy,
+! heavy-light or light-light) and the threads of a warp follow the same branch with similar costs.
+! pos(a) = 0 for an atom that is not s,p. ord(1:nsp) is the inverse.
+    integer, intent(in) :: numat, nat(numat), iorbs(numat)
+    integer, intent(out) :: pos(numat), ord(numat), nsp
+    integer :: a, pass
+    nsp = 0
+    pos(1:numat) = 0
+    do pass = 1, 2
+      do a = 1, numat
+        if (.not. acc_sp_atom(nat(a), iorbs(a))) cycle
+        if ((pass == 1) .neqv. (iorbs(a) == 4)) cycle
+        nsp = nsp + 1
+        pos(a) = nsp
+        ord(nsp) = a
+      end do
+    end do
+  end subroutine acc_sp_order
+
   integer function acc_pair_class(za, ia, zb, ib)
 ! Kind of an atom pair for the GPU Fock build, from the atomic numbers and orbital counts:
 ! 0: both atoms s or s,p (rotate_sp); 1: one s,p,d atom with an s or s,p atom (rotate_spd);
@@ -371,7 +392,10 @@ contains
     integer, external :: acc_fock_mode, acc_diagg_mode, acc_density_mode
     logical :: want_fock, want_diagg, want_dens, f, g, d, sdg, ddg
     integer(8) :: free, total, avail, limit, headroom, b_nij, b_fp, b_pacc, b_lists, b_cand, b_lmo_g, b_lmo_d, slots
-    integer(8) :: npair, npair_d, npair_sd, npair_dd, lcocc, lcvir, licocc, licvir
+    integer(8) :: npair, npair_d, npair_sd, npair_dd, lcocc, lcvir, licocc, licvir, ntpair
+    logical, allocatable :: tmark(:,:)
+    integer :: nt, nsp
+    integer, allocatable :: spos(:), sord(:)
     integer :: i, j, dev, k
     double precision, parameter :: gb = 1024.d0**3
     character(len=64) :: enabled
@@ -401,12 +425,18 @@ contains
     npair = 0
     npair_sd = 0
     npair_dd = 0
+    nt = (numat + 31)/32
+    allocate (tmark(nt, nt), spos(numat), sord(numat))
+    tmark = .false.
+    call acc_sp_order(numat, nat, iorbs, spos, sord, nsp)
     do i = 2, numat
       if (iorbs(i) == 0) cycle
       do j = 1, i - 1
         if (iorbs(j) == 0 .or. nijbo(i, j) < 0) cycle
         npair = npair + 1
         select case (acc_pair_class(nat(i), iorbs(i), nat(j), iorbs(j)))
+        case (0)                                             ! tile pairs of acc_fz2n (tile_n = 32)
+          tmark((max(spos(i), spos(j)) - 1)/32 + 1, (min(spos(i), spos(j)) - 1)/32 + 1) = .true.
         case (1)
           npair_sd = npair_sd + 1
         case (2)
@@ -415,6 +445,8 @@ contains
       end do
     end do
     npair_d = npair_sd + npair_dd
+    ntpair = count(tmark)
+    deallocate (tmark, spos, sord)
     lcocc = 0; lcvir = 0; licocc = 0; licvir = 0
     if (allocated(cocc)) lcocc = size(cocc, kind=8)
     if (allocated(cvir)) lcvir = size(cvir, kind=8)
@@ -423,7 +455,7 @@ contains
     b_nij = 4_8*int(numat, 8)**2
     b_fp = 24_8*int(mpack, 8)              ! F, P and H
     b_pacc = 8_8*int(mpack, 8)
-    b_lists = 8_8*npair + 760_8*npair_d + 16_8*numat
+    b_lists = 5120_8*ntpair + 8_8*ntpair + 760_8*npair_d + 24_8*numat   ! tile partials (2 x 32 x 10 doubles) + lists
     b_cand = 30_8*max(1000000_8, 2_8*int(fmo_dim, 8))     ! candidate buffer (20 bytes each) plus growth
     b_lmo_g = 16_8*(lcocc + lcvir) + 24_8*(licocc + licvir)
     b_lmo_d = 8_8*lcocc + 8_8*licocc
@@ -683,7 +715,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   use acc_mozyme_C, only : nij, nij_gen, acc_mozyme_sync, acc_mozyme_buffers, acc_to_device, acc_from_device, &
     fd_c, pd_c, fd_ok, pd_ok, acc_matches_device, allow_fock, held_lists, allow_sdgpu, allow_ddgpu, n_sdpairs, &
     n_ddpairs, lmem_sp, lmem_sd, lmem_dd, lmem_held, acc_pair_class, acc_lmem_begin, acc_lmem_end, &
-    dd_pending, t_iter, t_last_build, t_sd_gpu, acc_dd_decide, &
+    dd_pending, t_iter, t_last_build, t_sd_gpu, acc_dd_decide, acc_sp_order, &
     nd => dp_nd, nsd => dp_nsd, ndd => dp_ndd, dpi => dp_i, dpj => dp_j, dcls => dp_cls, isd => dp_isd, &
     idd => dp_idd, dstart => dp_start, dlist => dp_list, cdi => dp_ci, cdj => dp_cj
   use iso_c_binding, only : c_f_pointer
@@ -702,8 +734,18 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   integer(8) :: free0, tc0, tc1, trate
   integer :: c
   double precision, pointer, contiguous :: fdev(:), pdev(:)
-  integer, save :: nnear = 0, my_gen = -1
-  integer, allocatable, save :: nstart(:), near(:)
+  integer, save :: my_gen = -1, ntile = 0, ntp = 0
+! s,p NDDO pairs in tiles of tile_n consecutive positions of the s,p atoms (acc_sp_order: heavy atoms
+! first, so that tile pairs are of one kind): tile pairs (ta >= tb) that hold at least one such pair,
+! per tile the list of its tile pairs (tlist from tstart: +tp, the tile is ta(tp); -tp, it is tb(tp);
+! in increasing tp, + before -), the position of each atom (spos, 0 if not s,p) and the atom at each
+! position (sord), and the partial sums (part).
+  integer, parameter :: tile_n = 32
+  integer, allocatable, save :: ta(:), tb(:), tstart(:), tlist(:), spos(:), sord(:)
+  integer, save :: nsp = 0
+  double precision, allocatable, save :: part(:,:,:,:)
+  logical, allocatable :: mark(:,:)
+  integer :: x, y, nent
 ! The NDDO pairs with d orbitals (dpi, dpj, ... ) are module arrays of acc_mozyme_C (dp_*).
   logical, save :: unsupported = .false.
   integer :: kd, m
@@ -712,37 +754,68 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   integer :: a, b, ii, jj, k
   supported = .false.
   rebuilt = acc_mozyme_sync()   ! separate statement: Fortran need not evaluate a function inside .or.
-  if ((rebuilt .or. my_gen /= nij_gen .or. .not. allow_fock) .and. allocated(nstart)) then
-    !$acc exit data delete(nstart, near, dpi, dpj, dcls, isd, idd, dstart, dlist, cdi, cdj)
-    deallocate (nstart, near, dpi, dpj, dcls, isd, idd, dstart, dlist, cdi, cdj)
+  if ((rebuilt .or. my_gen /= nij_gen .or. .not. allow_fock) .and. allocated(ta)) then
+    !$acc exit data delete(ta, tb, tstart, tlist, spos, sord, part, dpi, dpj, dcls, isd, idd, dstart, dlist, cdi, cdj)
+    deallocate (ta, tb, tstart, tlist, spos, sord, part, dpi, dpj, dcls, isd, idd, dstart, dlist, cdi, cdj)
     held_lists = 0
     my_gen = -1
   end if
   if (.not. allow_fock) return            ! not enabled, or not enough device memory: CPU
   if (my_gen /= nij_gen) then
-! New geometry or new set of interactions: rebuild the NDDO s,p neighbor lists (CSR).
-    allocate (nstart(numat + 1))
-    nnear = 0
-    do k = 1, 2
-      if (k == 2) allocate (near(max(1, nnear)))
-      nnear = 0
-      do a = 1, numat
-        if (k == 2) nstart(a) = nnear + 1
-        spi = (iorbs(a) == 1 .or. iorbs(a) == 4) .and. .not. dorbs(nat(a)) .and. iod(nat(a)) == 0
-        if (.not. spi) cycle
-        do b = 1, numat
-          if (b == a) cycle
-          spj = (iorbs(b) == 1 .or. iorbs(b) == 4) .and. .not. dorbs(nat(b)) .and. iod(nat(b)) == 0
-          if (.not. spj) cycle
-          ii = max(a, b)
-          jj = min(a, b)
-          if (nij(ii, jj) < 0) cycle
-          nnear = nnear + 1
-          if (k == 2) near(nnear) = b
-        end do
+! New geometry or new set of interactions: rebuild the tile lists of the s,p NDDO pairs.
+    allocate (spos(numat), sord(numat))
+    call acc_sp_order(numat, nat, iorbs, spos, sord, nsp)
+    ntile = max(1, (nsp + tile_n - 1)/tile_n)
+    allocate (mark(ntile, ntile))
+    mark = .false.
+    do b = 1, numat                       ! nij(a, b) is contiguous in a
+      if (spos(b) == 0) cycle
+      y = (spos(b) - 1)/tile_n + 1
+      do a = b + 1, numat
+        if (spos(a) == 0) cycle
+        if (nij(a, b) < 0) cycle
+        x = (spos(a) - 1)/tile_n + 1
+        mark(max(x, y), min(x, y)) = .true.
       end do
     end do
-    nstart(numat + 1) = nnear + 1
+    ntp = 0
+    do x = 1, ntile
+      do y = 1, x
+        if (mark(x, y)) ntp = ntp + 1
+      end do
+    end do
+    allocate (ta(max(1, ntp)), tb(max(1, ntp)), tstart(ntile + 1), part(10, tile_n, 2, max(1, ntp)))
+    ntp = 0
+    tstart = 0
+    nent = 0
+    do x = 1, ntile
+      do y = 1, x
+        if (.not. mark(x, y)) cycle
+        ntp = ntp + 1
+        ta(ntp) = x
+        tb(ntp) = y
+        tstart(x) = tstart(x) + 1
+        tstart(y) = tstart(y) + 1
+        nent = nent + 2
+      end do
+    end do
+    deallocate (mark)
+    allocate (tlist(max(1, nent)), dtmp(ntile))
+    m = 1
+    do x = 1, ntile
+      k = tstart(x)
+      tstart(x) = m
+      m = m + k
+    end do
+    tstart(ntile + 1) = m
+    dtmp(1:ntile) = tstart(1:ntile)
+    do k = 1, ntp
+      tlist(dtmp(ta(k))) = k
+      dtmp(ta(k)) = dtmp(ta(k)) + 1
+      tlist(dtmp(tb(k))) = -k
+      dtmp(tb(k)) = dtmp(tb(k)) + 1
+    end do
+    deallocate (dtmp)
 ! NDDO pairs with d orbitals (the complement of the s,p list among NDDO pairs)
     unsupported = .false.
     nd = 0
@@ -802,12 +875,13 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
     end do
     deallocate (dtmp)
     if (unsupported) write (iw, '(a)') ' ACC FOCK: NDDO pairs of an unsupported kind; the GPU Fock build is not used'
-    !$acc enter data copyin(nstart, near, dpi, dpj, dcls, isd, idd, dstart, dlist) create(cdi, cdj)
+    !$acc enter data copyin(ta, tb, tstart, tlist, spos, sord, dpi, dpj, dcls, isd, idd, dstart, dlist) create(part, cdi, cdj)
     n_sdpairs = nsd
     n_ddpairs = ndd
-    held_lists = 4_8*(size(nstart, kind=8) + size(near, kind=8) + size(dpi, kind=8) + size(dpj, kind=8) + &
+    held_lists = 4_8*(size(ta, kind=8) + size(tb, kind=8) + size(tstart, kind=8) + size(tlist, kind=8) + &
+      size(spos, kind=8) + size(sord, kind=8) + size(dpi, kind=8) + size(dpj, kind=8) + &
       size(dcls, kind=8) + size(isd, kind=8) + size(idd, kind=8) + size(dstart, kind=8) + size(dlist, kind=8)) + &
-      8_8*(size(cdi, kind=8) + size(cdj, kind=8))
+      8_8*(size(part, kind=8) + size(cdi, kind=8) + size(cdj, kind=8))
     my_gen = nij_gen
   end if
   if (unsupported) return
@@ -833,7 +907,9 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
   end if
   call c_f_pointer(fd_c, fdev, [mpack])
   call c_f_pointer(pd_c, pdev, [mpack])
-  call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, nstart, near, max(1, nnear))
+  if (ntp > 0) call acc_fz2n_tiles(numat, mpack, ntp, tile_n, nsp, fdev, pdev, iorbs, nat, coord, nij, sord, ta, tb, &
+    part)
+  call acc_fz2n_kernel(numat, mpack, fdev, pdev, qe, iorbs, nat, coord, nij, ntile, ntp, tile_n, spos, tstart, tlist, part)
   lmem_held = max(lmem_held, lmem_sp)
 ! Pairs with d orbitals: each kernel's first launch measures the local-memory reservation it triggers.
   if (nsd > 0 .and. allow_sdgpu) then
@@ -1068,31 +1144,114 @@ subroutine acc_fz2n_cpu_dpairs(f, ptot, iorbs, nat, coord)
 end subroutine acc_fz2n_cpu_dpairs
 #ifdef _OPENACC
 
-subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, nstart, near, lnear)
+subroutine acc_fz2n_tiles(numat, mpack, ntp, tile_n, nsp, f, ptot, iorbs, nat, coord, nij, sord, ta, tb, part)
+! s,p NDDO pairs in blocks of s,p atom positions (acc_sp_order: heavy atoms first, so a tile pair holds
+! pairs of one kind): one gang of tile_n threads per tile pair (ta, tb), ta >= tb; thread t owns the
+! atom at position pa = (ta-1)*tile_n + t. In step s it takes the pair with the atom at position
+! pb = (tb-1)*tile_n + 1 + mod(t-1+s, tile_n), so within a step the threads of the gang take different
+! atoms b (in a diagonal tile, only pb < pa): each pair is computed once
+! (acc_fz_pair_sp), its contribution to a is added to the thread's own sum (ca) and that to b to the
+! gang's shared sum for b (sb) without atomics, in a fixed order. The two sums per atom are stored as
+! the tile pair's partial sums (part(:,:,1,tp) for the atoms of ta, part(:,:,2,tp) for those of tb),
+! which acc_fz2n_kernel adds per atom in a fixed order: the result is reproducible.
   implicit none
-  integer, intent(in) :: numat, mpack, lnear
+  integer, intent(in) :: numat, mpack, ntp, tile_n, nsp
+  double precision, intent(inout) :: f(mpack)
+  double precision, intent(in) :: ptot(mpack), coord(3, numat)
+  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), sord(numat), ta(ntp), tb(ntp)
+  double precision, intent(out) :: part(10, tile_n, 2, ntp)
+  integer :: tp, t, s, a, b, a0, b0, x, pa, pb
+  double precision :: ca(10, 32), sb(10, 32), ci(10), cj(10)
+  !$acc routine(acc_fz_pair_sp) seq
+  !$acc data copyin(coord, iorbs, nat) present(nij, sord, ta, tb, part) deviceptr(f, ptot)
+  !$acc parallel loop gang vector_length(32) private(ca, sb, a0, b0)
+  do tp = 1, ntp
+    a0 = (ta(tp) - 1)*tile_n
+    b0 = (tb(tp) - 1)*tile_n
+    !$acc loop vector private(x)
+    do t = 1, tile_n
+      do x = 1, 10
+        ca(x, t) = 0.d0
+        sb(x, t) = 0.d0
+      end do
+    end do
+    !$acc loop seq
+    do s = 0, tile_n - 1
+      !$acc loop vector private(a, b, ci, cj, x, pa, pb)
+      do t = 1, tile_n
+        pa = a0 + t
+        pb = b0 + 1 + mod(t - 1 + s, tile_n)
+        if (pa <= nsp .and. pb < pa) then
+          a = sord(pa)
+          b = sord(pb)
+          if (nij(max(a, b), min(a, b)) >= 0) then
+! ii = max(a, b) for the integrals; ci goes to ii, cj to jj
+            call acc_fz_pair_sp(max(a, b), min(a, b), numat, mpack, f, ptot, iorbs, nat, coord, nij, ci, cj)
+            if (a > b) then
+              do x = 1, 10
+                ca(x, t) = ca(x, t) + ci(x)
+                sb(x, pb - b0) = sb(x, pb - b0) + cj(x)
+              end do
+            else
+              do x = 1, 10
+                ca(x, t) = ca(x, t) + cj(x)
+                sb(x, pb - b0) = sb(x, pb - b0) + ci(x)
+              end do
+            end if
+          end if
+        end if
+      end do
+    end do
+    !$acc loop vector private(x)
+    do t = 1, tile_n
+      do x = 1, 10
+        part(x, t, 1, tp) = ca(x, t)
+        part(x, t, 2, tp) = sb(x, t)
+      end do
+    end do
+  end do
+  !$acc end data
+end subroutine acc_fz2n_tiles
+
+subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, ntile, ntp, tile_n, spos, tstart, tlist, &
+  part)
+! Per atom: the s,p NDDO pair contributions to its diagonal block, summed from the partial sums of
+! acc_fz2n_tiles over the atom's tile pairs in a fixed order, and the point-charge pairs.
+  implicit none
+  integer, intent(in) :: numat, mpack, ntile, ntp, tile_n
   double precision, intent(inout) :: f(mpack)
   double precision, intent(in) :: ptot(mpack), qe(numat), coord(3, numat)
-  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), nstart(numat + 1), near(lnear)
-  integer :: a, b, k, d, na
+  integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat), spos(numat), tstart(ntile + 1), tlist(*)
+  double precision, intent(in) :: part(10, tile_n, 2, *)
+  integer :: a, b, k, d, na, x, ta, tp, sd, kl
   double precision :: c(10), cm, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, sm
-  !$acc routine(acc_fz_near_sp) seq
   !$acc routine(acc_fz_far) seq
-  !$acc data copyin(qe, coord, iorbs, nat) present(nij, nstart, near) deviceptr(f, ptot)
-  !$acc parallel loop gang vector_length(128) private(na, d, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, sm)
+  !$acc data copyin(qe, coord, iorbs, nat) present(nij, spos, tstart, tlist, part) deviceptr(f, ptot)
+  !$acc parallel loop gang vector_length(128) private(na, d, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, sm, x, ta, kl)
   do a = 1, numat
     na = iorbs(a)
     if (na == 0) cycle
     d = nij(a, a)
     s1 = 0.d0; s2 = 0.d0; s3 = 0.d0; s4 = 0.d0; s5 = 0.d0
     s6 = 0.d0; s7 = 0.d0; s8 = 0.d0; s9 = 0.d0; s10 = 0.d0; sm = 0.d0
-! NDDO pairs, s,p atoms only (the list is empty for an atom with d orbitals)
-    !$acc loop vector private(b, c) reduction(+:s1, s2, s3, s4, s5, s6, s7, s8, s9, s10)
-    do k = nstart(a), nstart(a + 1) - 1
-      b = near(k)
-      call acc_fz_near_sp(a, b, numat, mpack, f, ptot, iorbs, nat, coord, nij, c)
-      s1 = s1 + c(1); s2 = s2 + c(2); s3 = s3 + c(3); s4 = s4 + c(4); s5 = s5 + c(5)
-      s6 = s6 + c(6); s7 = s7 + c(7); s8 = s8 + c(8); s9 = s9 + c(9); s10 = s10 + c(10)
+! NDDO pairs, s,p atoms only (an atom with d orbitals has no entries in the tile partials)
+    x = 1
+    ta = 1
+    kl = 0                                ! not an s,p atom: no tile entries
+    if (spos(a) > 0) then
+      x = (spos(a) - 1)/tile_n + 1
+      ta = spos(a) - (x - 1)*tile_n
+      kl = tstart(x + 1) - 1
+    end if
+    !$acc loop vector private(tp, sd) reduction(+:s1, s2, s3, s4, s5, s6, s7, s8, s9, s10)
+    do k = tstart(x), kl
+      tp = abs(tlist(k))
+      sd = 1
+      if (tlist(k) < 0) sd = 2
+      s1 = s1 + part(1, ta, sd, tp); s2 = s2 + part(2, ta, sd, tp); s3 = s3 + part(3, ta, sd, tp)
+      s4 = s4 + part(4, ta, sd, tp); s5 = s5 + part(5, ta, sd, tp); s6 = s6 + part(6, ta, sd, tp)
+      s7 = s7 + part(7, ta, sd, tp); s8 = s8 + part(8, ta, sd, tp); s9 = s9 + part(9, ta, sd, tp)
+      s10 = s10 + part(10, ta, sd, tp)
     end do
 ! Point-charge pairs (monopole, and dipole where nijbo = -2)
     !$acc loop vector private(c, cm) reduction(+:s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, sm)
@@ -1128,17 +1287,19 @@ subroutine acc_fz2n_kernel(numat, mpack, f, ptot, qe, iorbs, nat, coord, nij, ns
   !$acc end data
 end subroutine acc_fz2n_kernel
 
-subroutine acc_fz_near_sp(a, b, numat, mpack, f, ptot, iorbs, nat, coord, nij, c)
-! Contribution of the NDDO pair (a, b) to the diagonal block of a, as packed lower triangle c(1:10);
-! if a > b, also subtracts the exchange term from the off-diagonal block (a, b) of f.
+subroutine acc_fz_pair_sp(ii, jj, numat, mpack, f, ptot, iorbs, nat, coord, nij, ci, cj)
+! NDDO pair (ii, jj), ii > jj, both atoms s or s,p: the integrals once, the contributions to the
+! diagonal blocks of both atoms (ci for ii, cj for jj; formerly computed separately, with the
+! integrals evaluated twice, for each atom), and the exchange term subtracted from the off-diagonal
+! block (ii, jj) of f.
   implicit none
   !$acc routine seq
   !$acc routine(rotate_sp) seq
-  integer, intent(in) :: a, b, numat, mpack
+  integer, intent(in) :: ii, jj, numat, mpack
   double precision, intent(inout) :: f(mpack)
   double precision, intent(in) :: ptot(mpack), coord(3, numat)
   integer, intent(in) :: iorbs(numat), nat(numat), nij(numat, numat)
-  double precision, intent(out) :: c(10)
+  double precision, intent(out) :: ci(10), cj(10)
   integer, parameter :: jindx(10,16) = reshape([ &
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 31, 32, 33, 34, 35, 36, &
     & 37, 38, 39, 40, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 11, 12, 13, 14, 15, 16, 17, 18, 19, &
@@ -1167,10 +1328,8 @@ subroutine acc_fz_near_sp(a, b, numat, mpack, f, ptot, iorbs, nat, coord, nij, c
     & 88, 89, 90, 61, 62, 64, 67, 71, 72, 74, 77, 81, 82, 84, 87, 91, 92, 94, 97, 62, 63, 65, 68, &
     & 72, 73, 75, 78, 82, 83, 85, 88, 92, 93, 95, 98, 64, 65, 66, 69, 74, 75, 76, 79, 84, 85, 86, &
     & 89, 94, 95, 96, 99, 67, 68, 69, 70, 77, 78, 79, 80, 87, 88, 89, 90, 97, 98, 99, 100], [16,16])
-  integer :: ii, jj, ia, ja, di, dj, l, i, j, k, m, jk, kj, li
+  integer :: ia, ja, di, dj, l, i, j, k, m, jk, kj, li
   double precision :: w(100), e1b(10), e2a(10), enuc, p(16), sum, sumoff, sumdia
-  ii = max(a, b)
-  jj = min(a, b)
   call rotate_sp(nat(ii), nat(jj), coord(1, ii), coord(1, jj), w, e1b, e2a, enuc)
   ia = iorbs(ii)
   ja = iorbs(jj)
@@ -1178,99 +1337,93 @@ subroutine acc_fz_near_sp(a, b, numat, mpack, f, ptot, iorbs, nat, coord, nij, c
   dj = nij(jj, jj)
   l = nij(ii, jj)
   do i = 1, 10
-    c(i) = 0.d0
+    ci(i) = 0.d0
+    cj(i) = 0.d0
   end do
   if (ia == 4 .and. ja == 4) then
-! Heavy atom - heavy atom: jab_for_MOZYME (Coulomb) and kab_for_MOZYME (exchange)
-    if (a == ii) then
-      m = 0
-      do j = 1, 4
-        do k = 1, 4
-          m = m + 1
-          jk = min(j, k)
-          kj = k + j - jk
-          p(m) = ptot(dj + (kj*(kj - 1))/2 + jk)
-        end do
+! Heavy atom - heavy atom. ii: Coulomb from the density of jj, and the exchange block.
+    m = 0
+    do j = 1, 4
+      do k = 1, 4
+        m = m + 1
+        jk = min(j, k)
+        kj = k + j - jk
+        p(m) = ptot(dj + (kj*(kj - 1))/2 + jk)
       end do
-      do j = 1, 16
-        do i = 1, 10
-          c(i) = c(i) + p(j)*w(jjndx(i, j))
-        end do
+    end do
+    do j = 1, 16
+      do i = 1, 10
+        ci(i) = ci(i) + p(j)*w(jjndx(i, j))
       end do
-      do j = 1, 16
-        sum = 0.d0
-        do i = 1, 16
-          sum = sum + ptot(l + i)*w(kkind(i, j))
-        end do
-        f(l + j) = f(l + j) - sum*0.5d0
+    end do
+    do j = 1, 16
+      sum = 0.d0
+      do i = 1, 16
+        sum = sum + ptot(l + i)*w(kkind(i, j))
       end do
-    else
-      m = 0
-      do j = 1, 4
-        do k = 1, 4
-          m = m + 1
-          jk = min(j, k)
-          kj = k + j - jk
-          p(m) = ptot(di + (kj*(kj - 1))/2 + jk)
-        end do
+      f(l + j) = f(l + j) - sum*0.5d0
+    end do
+! jj: Coulomb from the density of ii.
+    m = 0
+    do j = 1, 4
+      do k = 1, 4
+        m = m + 1
+        jk = min(j, k)
+        kj = k + j - jk
+        p(m) = ptot(di + (kj*(kj - 1))/2 + jk)
       end do
-      do j = 1, 16
-        do i = 1, 10
-          c(i) = c(i) + p(j)*w(jindx(i, j))
-        end do
+    end do
+    do j = 1, 16
+      do i = 1, 10
+        cj(i) = cj(i) + p(j)*w(jindx(i, j))
       end do
-    end if
+    end do
   else if (ia == 4 .or. ja == 4) then
-! Heavy atom - light atom, either order. W runs over the heavy atom's 10 pairs.
-    if ((a == ii .and. ia == 4) .or. (a == jj .and. ja == 4)) then
-      if (ia == 4) then
-        li = dj + 1
-      else
-        li = di + 1
-      end if
+! Heavy atom - light atom. The heavy atom gets W (its 10 pairs) times the light atom's s density; the
+! light atom gets the heavy atom's density contracted with W.
+    if (ia == 4) then
       do k = 1, 10
-        c(k) = ptot(li)*w(k)
+        ci(k) = ptot(dj + 1)*w(k)
       end do
+      li = di
     else
-      if (ia == 4) then
-        li = di
-      else
-        li = dj
-      end if
-      sumoff = 0.d0
-      sumdia = 0.d0
-      k = 0
-      do i = 1, 4
-        do j = 1, i - 1
-          li = li + 1
-          k = k + 1
-          sumoff = sumoff + ptot(li)*w(k)
-        end do
+      do k = 1, 10
+        cj(k) = ptot(di + 1)*w(k)
+      end do
+      li = dj
+    end if
+    sumoff = 0.d0
+    sumdia = 0.d0
+    k = 0
+    do i = 1, 4
+      do j = 1, i - 1
         li = li + 1
         k = k + 1
-        sumdia = sumdia + ptot(li)*w(k)
+        sumoff = sumoff + ptot(li)*w(k)
       end do
-      c(1) = sumoff*2.d0 + sumdia
+      li = li + 1
+      k = k + 1
+      sumdia = sumdia + ptot(li)*w(k)
+    end do
+    if (ia == 4) then
+      cj(1) = sumoff*2.d0 + sumdia
+    else
+      ci(1) = sumoff*2.d0 + sumdia
     end if
-    if (a == ii) then
-      do i = 1, 4
-        sum = 0.d0
-        do j = 1, 4
-          sum = sum + ptot(l + j)*w((max(i, j)*(max(i, j) - 1))/2 + min(i, j))
-        end do
-        f(l + i) = f(l + i) - sum*0.5d0
+    do i = 1, 4
+      sum = 0.d0
+      do j = 1, 4
+        sum = sum + ptot(l + j)*w((max(i, j)*(max(i, j) - 1))/2 + min(i, j))
       end do
-    end if
+      f(l + i) = f(l + i) - sum*0.5d0
+    end do
   else
 ! Light atom - light atom
-    if (a == ii) then
-      c(1) = ptot(dj + 1)*w(1)
-      f(l + 1) = f(l + 1) - ptot(l + 1)*w(1)*0.5d0
-    else
-      c(1) = ptot(di + 1)*w(1)
-    end if
+    ci(1) = ptot(dj + 1)*w(1)
+    cj(1) = ptot(di + 1)*w(1)
+    f(l + 1) = f(l + 1) - ptot(l + 1)*w(1)*0.5d0
   end if
-end subroutine acc_fz_near_sp
+end subroutine acc_fz_pair_sp
 
 subroutine acc_fz_far(a, b, code, numat, mpack, ptot, qe, iorbs, nat, coord, nij, c, cm)
 ! Contribution of the point-charge pair (a, b) to the diagonal block of a: c(1:10) for the s,p
