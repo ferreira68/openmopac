@@ -405,13 +405,13 @@ contains
   end function acc_gpu_mode
 
   logical function acc_gpu_usable()
-! Once per process: selects the device (keyword SETGPU=n, n = 1, 2, ... among the visible devices;
-! default the first) and checks that this build has device code it can run: one of the compute
-! capabilities in MOPAC_ACC_CCS (CMake GPU_OPENACC_ARCH) with the same major version and a minor
-! version no higher than the device's. Otherwise MOZYME runs on the CPU. The outcome is written once.
-! The device cannot change later in the same process (the device buffers live there).
+! Once per process: selects the device and checks that this build has device code it can run: one of
+! the compute capabilities in MOPAC_ACC_CCS (CMake GPU_OPENACC_ARCH) with the same major version and a
+! minor version no higher than the device's. The keyword SETGPU=n (n = 1, 2, ... among the visible
+! devices) selects device n; otherwise the first visible device with code is used, so that e.g. an
+! older display card listed first is skipped. Without a usable device MOZYME runs on the CPU. The
+! device cannot change later in the same process (the device buffers live there).
     use molkst_C, only : keywrd
-    use chanel_C, only : iw
     integer, save :: state = 0                 ! 0 not yet checked, 1 usable, -1 not usable
 #ifdef _OPENACC
 #ifndef MOPAC_ACC_CCS
@@ -420,7 +420,7 @@ contains
     integer, parameter :: built(*) = [MOPAC_ACC_CCS]
     integer :: ndev, i, n, dev, cc, k
     double precision, external :: reada
-    logical :: ok
+    logical :: chosen
     character(len=64) :: bad
     bad = ''
     if (state == 0) then
@@ -429,34 +429,62 @@ contains
       if (ndev < 1) then
         gpu_why = 'no GPU visible'
       else
+        dev = -1
+        chosen = .false.
         i = index(keywrd, " SETGPU=")
         if (i /= 0) then
           n = nint(reada(keywrd, i))
           if (n >= 1 .and. n <= ndev) then
-            call c_acc_set_device_num(int(n - 1, c_int), 4_c_int)
+            dev = n - 1
+            chosen = .true.
           else
             write (bad, '(a,i0,a,i0,a)') '; SETGPU=', n, ' is not one of the ', ndev, ' visible devices'
           end if
         end if
-        dev = c_acc_get_device_num(4_c_int)
+        if (dev < 0) then
+          do i = 0, ndev - 1
+            if (has_code(acc_device_cc(i))) then
+              dev = i
+              exit
+            end if
+          end do
+        end if
+        if (dev < 0) dev = 0                         ! no device with code: report the first
         cc = acc_device_cc(dev)
-        ok = .false.
-        do k = 1, size(built)
-          if (cc > 0 .and. cc/10 == built(k)/10 .and. mod(cc, 10) >= mod(built(k), 10)) ok = .true.
-        end do
+! Select the device only if the build has code for it: selecting it loads the device code, and for a
+! device without matching SASS the runtime then JIT-compiles the embedded PTX, which aborts the program
+! if the driver is older than the CUDA used to build (e.g. driver CUDA 13.2, build CUDA 13.3).
+        if (has_code(cc)) call c_acc_set_device_num(int(dev, c_int), 4_c_int)
         write (gpu_desc, '(a,i0,3a,i0,a,i0,a)') 'device ', dev + 1, ', ', trim(acc_device_name(dev)), &
           ', compute capability ', cc/10, '.', mod(cc, 10), trim(bad)
-        if (ok) then
+        if (has_code(cc)) then
           state = 1
-        else
+        else if (chosen .or. ndev == 1) then
           write (gpu_why, '(3a,20(i0,a))') 'GPU ', trim(gpu_desc), ' has no code in this build; built for compute capability ', &
             (built(k)/10, '.', mod(built(k), 10), ' ', k = 1, size(built))
+        else
+          write (gpu_why, '(a,i0,a,20(i0,a))') 'none of the ', ndev, &
+            ' visible GPUs has code in this build; built for compute capability ', &
+            (built(k)/10, '.', mod(built(k), 10), ' ', k = 1, size(built))
+          gpu_why = trim(gpu_why)//trim(bad)            ! e.g. "; SETGPU=5 is not one of the 2 visible devices"
         end if
       end if
     end if
     acc_gpu_usable = (state == 1)
 #else
     acc_gpu_usable = .false.
+#endif
+#ifdef _OPENACC
+  contains
+    logical function has_code(c)
+! The build has device code a device of compute capability c (10*major + minor) can run.
+      integer, intent(in) :: c
+      integer :: m
+      has_code = .false.
+      do m = 1, size(built)
+        if (c > 0 .and. c/10 == built(m)/10 .and. mod(c, 10) >= mod(built(m), 10)) has_code = .true.
+      end do
+    end function has_code
 #endif
   end function acc_gpu_usable
 
