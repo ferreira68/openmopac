@@ -118,24 +118,27 @@ contains
     integer(c_int) :: ndev, dev, stat, major, minor
     integer(c_size_t) :: free_b, total_b, best_free
     integer :: i, req, maxgpu, lead
-    logical :: usable(0:63)
+    logical :: usable(0:63), conv
     logical, save :: done = .false.
     double precision, external :: reada
 
     if (done) return
     done = .true.
+    conv = index(keywrd, " MOZYME") == 0   ! a MOZYME job has its own execution-path line (acc_path_start)
     magma_on = .false.
     magma_timing = index(keywrd, " TIMES") /= 0
     maxgpu = 64
     if (index(keywrd, " NOGPU") /= 0) then
-      write (iw, '(a)') " MOPAC execution path: MAGMA GPU disabled by NOGPU; dense eigensolves use CPU LAPACK."
+      if (conv) write (iw, '(a)') " Using CPU execution"
+      write (iw, '(a)') " dense eigensolves on CPU (LAPACK; keyword NOGPU)"
       return
     end if
     ndev = 0
     stat = cudaGetDeviceCount(ndev)
     if (stat /= 0 .or. ndev < 1) then
-      write (iw, '(a,i0,a)') " MOPAC execution path: MAGMA no usable CUDA device (cudaGetDeviceCount status ", stat, &
-        "); dense eigensolves use CPU LAPACK."
+      if (conv) write (iw, '(a)') " Using CPU execution"
+      write (iw, '(a,i0,a)') " dense eigensolves on CPU (LAPACK; no usable CUDA device, cudaGetDeviceCount status ", stat, &
+        ")"
       return
     end if
     usable = .false.
@@ -154,15 +157,17 @@ contains
     if (i /= 0) then
       req = nint(reada(keywrd, i)) - 1
       if (req < 0 .or. req >= ndev) then
-        write (iw, '(a,i0,a,i0,a)') " MOPAC execution path: MAGMA SETGPU=", req + 1, " is not one of the ", ndev, &
-          " visible devices; choosing automatically."
+        write (iw, '(a,i0,a,i0,a)') " dense eigensolves on GPU chosen automatically (SETGPU=", req + 1, &
+          " is not one of the ", ndev, &
+          " visible devices)"
         req = -1
       end if
     end if
     if (req >= 0) then
       if (.not. usable(req)) then
-        write (iw, '(a,i0,a)') " MOPAC execution path: MAGMA SETGPU=", req + 1, &
-          " is not a device this MAGMA build supports; CPU LAPACK."
+        if (conv) write (iw, '(a)') " Using CPU execution"
+        write (iw, '(a,i0,a)') " dense eigensolves on CPU (LAPACK; SETGPU=", req + 1, &
+          " is not a device this MAGMA build supports)"
         return
       end if
       dev = req
@@ -184,17 +189,20 @@ contains
         end if
       end do
       if (dev < 0) then
-        write (iw, '(2a)') " MOPAC execution path: MAGMA no visible device is supported by this MAGMA build", &
-          " (needs compute 8.6-8.9 or 12.x); CPU LAPACK."
+        if (conv) write (iw, '(a)') " Using CPU execution"
+        write (iw, '(2a)') " dense eigensolves on CPU (LAPACK; no visible device is supported by this MAGMA build,", &
+          " which needs compute capability 8.6-8.9 or 12.x)"
         return
       end if
     end if
     if (cudaSetDevice(dev) /= 0) then
-      write (iw, '(a,i0,a)') " MOPAC execution path: MAGMA cudaSetDevice(", dev, ") failed; dense eigensolves use CPU LAPACK."
+      if (conv) write (iw, '(a)') " Using CPU execution"
+      write (iw, '(a,i0,a)') " dense eigensolves on CPU (LAPACK; cudaSetDevice(", dev, ") failed)"
       return
     end if
     if (magma_init() /= 0) then
-      write (iw, '(a)') " MOPAC execution path: MAGMA magma_init failed; dense eigensolves use CPU LAPACK."
+      if (conv) write (iw, '(a)') " Using CPU execution"
+      write (iw, '(a)') " dense eigensolves on CPU (LAPACK; magma_init failed)"
       return
     end if
     call magma_setdevice(dev)
@@ -202,12 +210,15 @@ contains
     magma_device = dev
     magma_on = .true.
     if (magma_ngpu > 1) then
-      write (iw, '(a,i0,a,i0,a,i0,a)') " MOPAC execution path: MAGMA ", magma_ngpu, " GPUs (CUDA devices 0-", magma_ngpu - 1, &
-        "; multi-GPU magma_dsyevd_m); dense eigensolves of order >= ", magma_min_n, " run on the GPUs when they fit."
+      if (conv) write (iw, '(a)') " Using GPU/CPU hybrid execution"
+      write (iw, '(a,i0,a,i0,a,i0,a)') " dense eigensolves of order >= ", magma_min_n, &
+        " on GPU when they fit (MAGMA multi-GPU magma_dsyevd_m, ", &
+        magma_ngpu, " GPUs, CUDA devices 0-", magma_ngpu - 1, ")"
     else
-      write (iw, '(a,i0,a,i0,a,i0,a,f7.1,a,f7.1,a,i0,a)') " MOPAC execution path: MAGMA CUDA device ", dev, " of ", ndev, &
-        " (arch ", magma_getdevice_arch(), "), ", dble(free_b)/1024.d0**3, " of ", dble(total_b)/1024.d0**3, &
-        " GiB free; dense eigensolves of order >= ", magma_min_n, " run on the GPU when they fit."
+      if (conv) write (iw, '(a)') " Using GPU/CPU hybrid execution"
+      write (iw, '(a,i0,a,i0,a,i0,a,i0,a,f7.1,a,f7.1,a)') " dense eigensolves of order >= ", magma_min_n, &
+        " on GPU when they fit (MAGMA, CUDA device ", dev, " of ", ndev, &
+        ", arch ", magma_getdevice_arch(), ", ", dble(free_b)/1024.d0**3, " of ", dble(total_b)/1024.d0**3, " GiB free)"
     end if
 #else
     if (.false.) write (iw, '(a)') keywrd   ! no GPU support compiled in

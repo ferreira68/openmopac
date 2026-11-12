@@ -91,9 +91,9 @@ basis functions. MAGMA is not part of the v1.0 test matrix.
 - `MOPAC_ACC_MEM_LIMIT=8GB` (or `KB`, `MB`, bytes) caps the device memory MOZYME may use on a shared GPU.
 - `MOPAC_ACC_FOCK`, `MOPAC_ACC_DIAGG`, `MOPAC_ACC_DENS`: `0` keeps that step on the CPU; `test` runs it on
   both and writes the largest difference on every call (for validation).
-- Every output file states the execution path in lines starting with `MOPAC execution path:` (full GPU,
-  GPU/CPU hybrid with what runs on the CPU and why, or CPU and why). `TIMES` or `DEBUG` add the device-memory
-  plan and other details, in lines starting with `MOPAC GPU`.
+- Every output file states the execution path once: `Using GPU execution`, `Using GPU/CPU hybrid execution` or
+  `Using CPU execution`, then a line saying what runs on the CPU or GPU and why. `TIMES` or `DEBUG` add the
+  device-memory plan, the d,d pair timing decision and other details, in lines starting with `MOPAC GPU`.
 
 ## Testing
 
@@ -106,6 +106,7 @@ FORTRANOPT=crlf MOPAC_ACC_FOCK=0 MOPAC_ACC_DIAGG=0 MOPAC_ACC_DENS=0 ctest -j 8  
 
 Expected: all 125 tests pass in both runs (and in a gfortran CPU-only build).
 
-The test comparison skips lines that contain `MOPAC`, so the execution-path and GPU lines do not affect it.
+The test comparison skips lines that contain `MOPAC`, `Using ... execution` lines and lines naming what runs `on CPU`
+or `on GPU`, so the execution-path and GPU lines do not affect it.
 GPU and CPU heats of formation agree within the test tolerance (0.01 kcal/mol): for example, 6e-4 kcal/mol for
 the `ALLBONDS` test molecule and 3e-5 kcal/mol for a whole protein (PTP1B, PM6, MOZYME).

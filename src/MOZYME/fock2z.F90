@@ -798,11 +798,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
       acc_mode = acc_fock_mode()
     else if (acc_fock_mode() /= 0) then
       if (ione /= 1) then
-        call acc_path_note('Fock build (periodic system)')
+        call acc_path_note('Fock build on CPU (periodic system)')
       else if (.not. (direct .and. semidr)) then
-        call acc_path_note('Fock build (NODIRECT or SEMIDIRECT)')
+        call acc_path_note('Fock build on CPU (NODIRECT or SEMIDIRECT)')
       else
-        call acc_path_note('Fock build (partial updates: only some atoms move)')
+        call acc_path_note('Fock build on CPU (partial updates: only some atoms move)')
       end if
     end if
     npass = 1
