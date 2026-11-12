@@ -466,6 +466,7 @@ contains
           write (gpu_why, '(a,i0,a,20(i0,a))') 'none of the ', ndev, &
             ' visible GPUs has code in this build; built for compute capability ', &
             (built(k)/10, '.', mod(built(k), 10), ' ', k = 1, size(built))
+          gpu_why = trim(gpu_why)//trim(bad)            ! e.g. "; SETGPU=5 is not one of the 2 visible devices"
         end if
       end if
     end if

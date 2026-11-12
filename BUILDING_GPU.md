@@ -85,8 +85,9 @@ basis functions. MAGMA is not part of the v1.0 test matrix.
 
 ## Controlling and checking the GPU use
 
-- MOZYME uses the GPU automatically. `NOGPU` keeps everything on the CPU; `SETGPU=n` picks visible GPU `n`
-  (1, 2, ...); `CUDA_VISIBLE_DEVICES` restricts the visible GPUs.
+- MOZYME uses the GPU automatically: by default the first visible GPU the build has device code for. `NOGPU`
+  keeps everything on the CPU; `SETGPU=n` picks visible GPU `n` (1, 2, ...); `CUDA_VISIBLE_DEVICES` restricts
+  the visible GPUs.
 - `MOPAC_ACC_MEM_LIMIT=8GB` (or `KB`, `MB`, bytes) caps the device memory MOZYME may use on a shared GPU.
 - `MOPAC_ACC_FOCK`, `MOPAC_ACC_DIAGG`, `MOPAC_ACC_DENS`: `0` keeps that step on the CPU; `test` runs it on
   both and writes the largest difference on every call (for validation).

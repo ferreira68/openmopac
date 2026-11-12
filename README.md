@@ -87,7 +87,7 @@ The keywords `TIMES` or `DEBUG` add the details: device-memory plan, kernel rese
 | Name | Kind | Effect |
 |---|---|---|
 | `NOGPU` | keyword | Run everything on the CPU. |
-| `SETGPU=n` | keyword | Use visible GPU number `n` (1, 2, ...); the default is the first. |
+| `SETGPU=n` | keyword | Use visible GPU number `n` (1, 2, ...). By default, the first visible GPU the build has device code for is used. |
 | `NOFEATHER` | keyword | Keep the full NDDO two-electron integrals under MOZYME. By default MOZYME blends the integrals of PM6 and later methods into point charges at long range ("feathering"), which changes the energy expression relative to the conventional SCF. |
 | `NOGASSCF` | keyword | With COSMO, start the SCF in solvent instead of converging a gas-phase SCF first. |
 | `MOPAC_ACC_FOCK`, `MOPAC_ACC_DIAGG`, `MOPAC_ACC_DENS` | environment | `0` keeps that step on the CPU; `test` runs it on both and writes the largest difference to the output on every call (validation). |
