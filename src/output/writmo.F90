@@ -18,7 +18,7 @@
 !
       use molkst_C, only : numat, nclose, nopen, fract, nalpha, nelecs, nbeta, &
       & norbs, nvar, gnorm, iflepo, enuclr,elect, ndep, nscf, numcal, numcal0, escf, &
-      & keywrd, os, verson, time0, moperr, last, iscf, id, pressure, mol_weight, &
+      & keywrd, os, verson, verson_by, time0, moperr, last, iscf, id, pressure, mol_weight, &
       jobnam, line, mers, uhf, method_indo, &
       density, formula, mozyme, mpack, stress, &
       sz, ss2, maxtxt, E_disp, E_hb, E_hh, l_normal_html, &
@@ -136,7 +136,8 @@
       iscf = max(1,iscf)
       write (iw, '(4X,A58)') iter(iscf)
       write (iw, "(2/29X,A,' CALCULATION')") trim(caltyp)
-      write (iw, '(55X,''MOPAC v'',a,'' '',a)') trim(verson), trim(os)
+      write (iw, '(2a)') repeat(' ', max(1, 79 - len_trim('MOPAC v'//trim(verson)//verson_by//' '//trim(os)))), &
+        'MOPAC v'//trim(verson)//verson_by//' '//trim(os)   ! ends in column 79, as the date below
       write (iw, '(55X,A24)') idate
       if (iscf == 2) then
 !
@@ -1015,7 +1016,8 @@
             write(iw,'(/10x,a)') "Could not write to archive file, run continuing."
             return
           end if
-      write (iwrite, '(55X,''MOPAC v'',a,'' '',a)') trim(verson), trim(os)
+      write (iwrite, '(2a)') repeat(' ', max(1, 79 - len_trim('MOPAC v'//trim(verson)//verson_by//' '//trim(os)))), &
+        'MOPAC v'//trim(verson)//verson_by//' '//trim(os)   ! ends in column 79, as the date below
       write (iwrite, '(55X,A24)') idate
       write(iwrite,"(/,a,/)")formula(:len_trim(formula))
       call wrttxt (iwrite)

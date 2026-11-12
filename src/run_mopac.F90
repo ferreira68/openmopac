@@ -33,7 +33,7 @@
         MM_corrections, lxfac, trunc_1, trunc_2, l_normal_html, &
         sparkle, itemp_1, maxtxt, koment, sz, ss2, keywrd_quoted, &
         nl_atoms, use_ref_geo, prt_coords, pdb_label, step, &
-        density, norbs, method_indo, nclose, nopen, backslash, os, git_hash, verson, &
+        density, norbs, method_indo, nclose, nopen, backslash, os, git_hash, verson, verson_by, &
         use_disk, run, numcal0, job_no0, step_num0
 !
       USE parameters_C, only : tore, ios, iop, iod, eisol, eheat, zs, eheat_sparkles, gss
@@ -103,9 +103,9 @@
 #endif
         if (jobnam == '-V' .OR. jobnam == '--version') then
 #ifdef MOPAC_GIT_HASH
-          write(*,"(a)") "MOPAC version "//trim(verson)//" commit "//trim(git_hash)
+          write(*,"(a)") "MOPAC version "//trim(verson)//verson_by//" commit "//trim(git_hash)
 #else
-          write(*,"(a)") "MOPAC version "//trim(verson)
+          write(*,"(a)") "MOPAC version "//trim(verson)//verson_by
 #endif
           stop
         end if

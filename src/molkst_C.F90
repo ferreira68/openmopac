@@ -277,6 +277,7 @@ module molkst_C
   character ::     &
   & jobnam*240 = ' ', &!
   & line*3000         !
+  character(len=*), parameter :: verson_by = ' (A. M. Ferreira)'  ! openmopac-gpu: printed after the version number
   character :: backslash = achar(92) ! portable way of representing the backslash character
   character :: keywrd*3000, koment*200, title*200, refkey(6)*3000, geo_ref_name*241, geo_dat_name*241, &
     allkey*3000, keywrd_txt*3000, refkey_ref(6)*3000, keywrd_quoted*3000

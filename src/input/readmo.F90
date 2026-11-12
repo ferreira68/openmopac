@@ -27,7 +27,7 @@
       USE symmetry_C, ONLY: idepfn, locdep, depmul, locpar
 !
       use molkst_C, only : ndep, numat, numcal, numcal0, natoms, nvar, keywrd, dh, &
-      & verson, is_PARAM, line, nl_atoms, l_feather, backslash, &
+      & verson, verson_by, is_PARAM, line, nl_atoms, l_feather, backslash, &
       & moperr, maxatoms, koment, title, method_pm6, refkey, l_feather_1, &
       isok, method_pm6_dh2, caltyp, keywrd_quoted, &
       method_pm7, jobnam, method_PM7_ts, arc_hof_1, keywrd_txt, txtmax, refkey_ref, &
@@ -698,7 +698,9 @@
       end if
       maxci = 10000
       write (iw, '(1X,a)')"**                                                                           **"
-      write (iw,"(1x,a)") "**                              MOPAC v"//verson//"                  **"
+      i = 7 + len_trim(verson) + len(verson_by)          ! "MOPAC v<version><verson_by>", centered in the 75 columns
+      write (iw,"(1x,5a)") "**", repeat(" ", (75 - i)/2), "MOPAC v"//trim(verson)//verson_by, &
+        repeat(" ", 75 - i - (75 - i)/2), "**"
       write (iw, '(1X,a)')"**                                                                           **"
       write (iw, '(1X,a)')"*******************************************************************************"
       write (iw, '(1X,a)')"** MOPAC's Digital Object Identifier: https://doi.org/10.5281/zenodo.6511958 **"
