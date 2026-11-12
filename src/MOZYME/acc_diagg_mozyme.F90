@@ -237,17 +237,19 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
   double precision, intent(inout) :: fmo(fmo_dim)
   double precision, intent(inout) :: sumt, tiny
   double precision, allocatable :: aocc(:), avs(:), aovs(:), wsv(:)
-  integer, allocatable :: offo(:), offv(:)
+  integer, allocatable :: offo(:), offv(:), sk(:), sp(:)
   integer :: cnt(1)
+  integer :: ba, bb, bm, key, ps
   integer :: i, j, jj, kk, k, k1, j1, j2, i1, i2, l, lo, n0, ne, kj, kl, lj, ii, i4, jx, j4, x, m, pos, idx, base, nk
   integer :: i1j1, i1j2, i2j1, i2j2
   double precision :: s, t, sum1
   logical :: lij
-  allocate (aocc(licocc), offo(licocc), avs(licvir), aovs(licvir), offv(licvir), wsv(lcvir))
+  allocate (aocc(licocc), offo(licocc), avs(licvir), aovs(licvir), offv(licvir), wsv(lcvir), sk(licvir), sp(licvir))
   cnt(1) = 0
   ncand = 0
   !$acc data copyin(iorbs, nfirst, nlast, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir) &
-  !$acc& present(nij, ci, cj, cl, cv) deviceptr(fao, p) create(aocc, offo, avs, aovs, offv, wsv) copyout(eigv) copy(cnt)
+  !$acc& present(nij, ci, cj, cl, cv) deviceptr(fao, p) create(aocc, offo, avs, aovs, offv, wsv, sk, sp) copyout(eigv) &
+  !$acc& copy(cnt)
 !
 ! K0: occupied LMOs: aocc and atom offsets
 !
@@ -353,11 +355,41 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
     eigv(i) = s
   end do
 !
+! K1b: per virtual LMO, its atoms sorted by atom number (sk) with their positions in the LMO (sp);
+! stable, so a leftmost binary search finds the same (first) position as a linear scan. K2 and K3
+! look up the occupied LMO's atoms here: O(log nce) per atom instead of O(nce). The occupied atoms
+! are still visited in their own order, so every sum is formed exactly as before.
+!
+  if (full .or. nlist > 0) then
+    !$acc parallel loop gang vector private(n0, ne, ba, bb, key, ps)
+    do i = 1, nvir
+      n0 = nnce(i)
+      ne = nce(i)
+      do ba = 1, ne
+        sk(n0 + ba) = icvir(n0 + ba)
+        sp(n0 + ba) = ba
+      end do
+      do ba = 2, ne
+        key = sk(n0 + ba)
+        ps = sp(n0 + ba)
+        bb = ba - 1
+        do while (bb >= 1)
+          if (sk(n0 + bb) <= key) exit
+          sk(n0 + bb + 1) = sk(n0 + bb)
+          sp(n0 + bb + 1) = sp(n0 + bb)
+          bb = bb - 1
+        end do
+        sk(n0 + bb + 1) = key
+        sp(n0 + bb + 1) = ps
+      end do
+    end do
+  end if
+!
 ! K2: full pass, occupied-virtual matrix elements (screening as in diagg1)
 !
   if (full) then
     !$acc parallel loop collapse(2) gang vector private(i1, i2, j1, j2, i1j1, i1j2, i2j1, i2j2, s, lij, l, kk, k1, pos, &
-    !$acc& m, nk, base, idx)
+    !$acc& m, nk, base, idx, ba, bb, bm)
     do i = 1, nvir
       do j = 1, nocc
         i1 = icvir(nnce(i) + 1)
@@ -388,13 +420,20 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
             l = 0
             do kk = nncf(j) + 1, nncf(j) + ncf(j)
               k1 = icocc(kk)
-              pos = 0
-              do m = 1, nce(i)
-                if (icvir(nnce(i) + m) == k1) then
-                  pos = m
-                  exit
+              pos = 0                    ! position of atom k1 in virtual LMO i (K1b)
+              ba = 1
+              bb = nce(i)
+              do while (ba <= bb)
+                bm = (ba + bb)/2
+                if (sk(nnce(i) + bm) < k1) then
+                  ba = bm + 1
+                else
+                  bb = bm - 1
                 end if
               end do
+              if (ba <= nce(i)) then
+                if (sk(nnce(i) + ba) == k1) pos = sp(nnce(i) + ba)
+              end if
               if (pos == 0) then
                 l = l + iorbs(k1)
               else if (aocc(kk)*aovs(nnce(i) + pos) < cutoff) then
@@ -433,7 +472,7 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
     sumt = 0.d0
     tiny = 0.d0
     !$acc parallel loop gang vector copyin(ifmo_in(:, 1:nlist)) copyout(fmo(1:nlist)) private(i, j, s, l, kk, k1, pos, m, &
-    !$acc& base, nk) reduction(+:sumt) reduction(max:tiny)
+    !$acc& base, nk, ba, bb, bm) reduction(+:sumt) reduction(max:tiny)
     do x = 1, nlist
       i = ifmo_in(1, x)
       j = ifmo_in(2, x)
@@ -441,13 +480,20 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
       l = 0
       do kk = nncf(j) + 1, nncf(j) + ncf(j)
         k1 = icocc(kk)
-        pos = 0
-        do m = 1, nce(i)
-          if (icvir(nnce(i) + m) == k1) then
-            pos = m
-            exit
+        pos = 0                          ! position of atom k1 in virtual LMO i (K1b)
+        ba = 1
+        bb = nce(i)
+        do while (ba <= bb)
+          bm = (ba + bb)/2
+          if (sk(nnce(i) + bm) < k1) then
+            ba = bm + 1
+          else
+            bb = bm - 1
           end if
         end do
+        if (ba <= nce(i)) then
+          if (sk(nnce(i) + ba) == k1) pos = sp(nnce(i) + ba)
+        end if
         if (pos == 0) then
           l = l + iorbs(k1)
         else if (aovs(nnce(i) + pos)*aocc(kk) < cutoff) then
@@ -532,7 +578,7 @@ subroutine acc_diagg1_kernels(numat, mpack, nocc, nvir, licocc, lcocc, licvir, l
   if (full .and. ncand > 0 .and. ncand <= cap) then
     !$acc update host(ci(1:ncand), cj(1:ncand), cl(1:ncand), cv(1:ncand))
   end if
-  deallocate (aocc, offo, avs, aovs, offv, wsv)
+  deallocate (aocc, offo, avs, aovs, offv, wsv, sk, sp)
 end subroutine acc_diagg1_kernels
 
 subroutine acc_diagg1_order(ncand, nvir, ci, cj, cl, cv, nij, oldlim, fmo_dim, ifmo, fmo, nfmo_out, ijc, sumt, tiny)
