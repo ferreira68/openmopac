@@ -59,9 +59,9 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
       gmode = acc_density_mode()
     else if (acc_density_mode() /= 0) then
       if (.not. lijbo) then
-        call acc_path_note('density (no atom-pair index table)')
+        call acc_path_note('density on CPU (no atom-pair index table)')
       else
-        call acc_path_note('density (partial updates: only some atoms move)')
+        call acc_path_note('density on CPU (partial updates: only some atoms move)')
       end if
     end if
     if (gmode == 1) then

@@ -134,7 +134,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     if (lijbo) then
       gmode = acc_diagg_mode()
     else if (acc_diagg_mode() /= 0) then
-      call acc_path_note('DIAGG1 (no atom-pair index table)')
+      call acc_path_note('DIAGG1 on CPU (no atom-pair index table)')
     end if
     full = (idiagg <= 5 .or. Mod (idiagg, 2) == 0)
     docc = .not. (idiagg > 2 .and. Mod (idiagg, 4) /= 0)

@@ -73,12 +73,15 @@ density matrix, the occupied-virtual screening and rotation setup of DIAGG1, and
 steps (one-electron matrix, DIAGG2, convergence control) run on the CPU with OpenMP threads. If the device has too little
 memory for all of this, the parts that do not fit stay on the CPU. Conventional SCF calculations run on the CPU.
 
-Every output file states the execution path, in lines that start with `MOPAC execution path:`: **full GPU**,
-**GPU/CPU hybrid** (with what runs on the CPU and why), or **CPU** (and why: no GPU visible, `NOGPU`, a device the
-build has no code for, not enough device memory, ...). Example:
+Every output file states the execution path once: a line `Using GPU execution`, `Using GPU/CPU hybrid execution`
+or `Using CPU execution`, followed by a line saying what runs on the CPU or GPU and why (no GPU visible, `NOGPU`, a
+device the build has no code for, not enough device memory, ...). A line is repeated only if the split changes during
+the job, not at every SCF of a geometry optimization. Example:
 ```
- MOPAC execution path: MOZYME on the GPU (device 1, NVIDIA GeForce RTX 5090 Laptop GPU, compute capability 12.0); ...
- MOPAC execution path: full GPU (every MOZYME step with GPU code: Fock build, density, DIAGG1, energy)
+ MOZYME on GPU device 1, NVIDIA GeForce RTX 5060, compute capability 12.0
+          Geometry optimization using L-BFGS
+ Using GPU/CPU hybrid execution
+ d,d NDDO pairs on CPU (moved to GPU after first Fock builds if faster)
 ```
 The keywords `TIMES` or `DEBUG` add the details: device-memory plan, kernel reservations, transfer settings.
 

@@ -197,17 +197,22 @@ module acc_mozyme_C
   logical :: pin_said(3) = .false.          ! the first pinning of f, p, h is reported
   procedure(cu_host_register), pointer :: pin_reg => null()
   procedure(cu_host_unregister), pointer :: pin_unreg => null()
-! Execution-path report, written in every build and every job (lines " MOPAC execution path: ..."):
-! at the start of the job (acc_path_start), after the device-memory plan (acc_mozyme_plan) and
-! whenever the split between GPU and CPU changes (acc_path_update): full GPU, GPU/CPU hybrid (what runs
-! on the CPU, and why) or CPU (why). The lines start with "MOPAC", which the MOPAC tests skip.
-  character(len=400) :: path_last = ''
+! Execution-path report, written in every build and every job: a line " Using <mode> execution" (mode GPU,
+! GPU/CPU hybrid or CPU) and a detail line naming what runs on the CPU or GPU, and why. Written at the start
+! of the job (acc_path_start), after the device-memory plan of the first SCF (acc_mozyme_plan) and when the
+! split between GPU and CPU changes (acc_path_update); each mode/detail pair at most once per job, so the
+! plan repeated at every SCF of a geometry optimization adds nothing. Timing decisions are reported only
+! with TIMES or DEBUG. tests/compare_output.py skips these lines ("Using ... execution", "... on CPU|GPU").
+  character(len=4000) :: path_said = ''     ! every mode/detail pair written in this job
+  character(len=40) :: path_mode = ''       ! the mode of the last "Using ... execution" line
   character(len=200) :: gpu_why = ''        ! why no device is usable (acc_gpu_usable)
   character(len=160) :: gpu_desc = ''       ! the device used
   character(len=200) :: path_notes = ''     ! steps kept on the CPU for reasons other than memory (acc_path_note)
   character(len=120) :: path_mem = ''       ! device-memory reason of the plan, if it shed a GPU path
   logical :: path_planned = .false., path_want_f = .false., path_want_g = .false., path_want_d = .false.
   integer :: path_nsd = 0, path_ndd = 0
+  logical :: path_dd_timed = .false.       ! the plan left the d,d pairs to the timing (acc_dd_decide)
+  logical :: path_dd_moved = .false.       ! the timing moved them to the GPU in this job
 contains
   logical function acc_sp_atom(z, io)
 ! An atom (atomic number z, io orbitals) with an s or s,p basis and no d-orbital terms.
@@ -519,13 +524,21 @@ contains
 #endif
   end function acc_device_name
 
-  subroutine acc_path_say(text)
-! Writes the execution path, unless it is the one written last in this job.
+  subroutine acc_path_say(mode, detail)
+! Writes " Using <mode> execution" (unless that is the mode written last) and the detail line, unless this
+! mode/detail pair was written before in this job. mode = '' writes the detail line alone.
     use chanel_C, only : iw
-    character(len=*), intent(in) :: text
-    if (trim(text) == trim(path_last)) return
-    path_last = text
-    write (iw, '(2a)') ' MOPAC execution path: ', trim(text)
+    character(len=*), intent(in) :: mode, detail
+    character(len=600) :: key
+    key = '{'//trim(mode)//'|'//trim(detail)//'}'
+    if (index(path_said, trim(key)) /= 0) return
+    if (len_trim(path_said) + len_trim(key) > len(path_said)) path_said = ''
+    path_said = trim(path_said)//trim(key)
+    if (len_trim(mode) > 0 .and. trim(mode) /= trim(path_mode)) then
+      write (iw, '(3a)') ' Using ', trim(mode), ' execution'
+      path_mode = mode
+    end if
+    if (len_trim(detail) > 0) write (iw, '(2a)') ' ', trim(detail)
   end subroutine acc_path_say
 
   subroutine acc_path_start()
@@ -533,34 +546,36 @@ contains
 ! and, if MOZYME will not use the GPU, why. For MOZYME on the GPU the split between GPU and CPU is
 ! reported after the device-memory plan of the first SCF (acc_path_update).
     use molkst_C, only : keywrd, mozyme
-    path_last = ''
+    path_said = ''
+    path_mode = ''
+    path_dd_timed = .false.
+    path_dd_moved = .false.
     path_notes = ''
     path_mem = ''
     path_planned = .false.
 #ifdef _OPENACC
     if (.not. mozyme) then
 #ifdef MOPAC_MAGMA
-      call acc_path_say('conventional SCF on the CPU; dense eigensolves on the GPU (MAGMA) where they fit')
+      call acc_path_say('GPU/CPU hybrid', 'conventional SCF on CPU; dense eigensolves on GPU (MAGMA) where they fit')
 #else
-      call acc_path_say('CPU (conventional SCF; this build runs MOZYME on the GPU)')
+      call acc_path_say('CPU', 'conventional SCF on CPU (this build runs MOZYME on GPU)')
 #endif
     else if (index(keywrd, " NOGPU") /= 0) then
-      call acc_path_say('CPU (keyword NOGPU)')
+      call acc_path_say('CPU', 'MOZYME on CPU (keyword NOGPU)')
     else if (.not. acc_gpu_usable()) then
-      call acc_path_say('CPU ('//trim(gpu_why)//')')
+      call acc_path_say('CPU', 'MOZYME on CPU ('//trim(gpu_why)//')')
     else if (acc_gpu_mode("MOPAC_ACC_FOCK") == 0 .and. acc_gpu_mode("MOPAC_ACC_DIAGG") == 0 .and. &
       acc_gpu_mode("MOPAC_ACC_DENS") == 0) then
-      call acc_path_say('CPU (MOPAC_ACC_FOCK, MOPAC_ACC_DIAGG and MOPAC_ACC_DENS are set to 0)')
+      call acc_path_say('CPU', 'MOZYME on CPU (MOPAC_ACC_FOCK, MOPAC_ACC_DIAGG and MOPAC_ACC_DENS are set to 0)')
     else
-      call acc_path_say('MOZYME on the GPU ('//trim(gpu_desc)// &
-        '); the split between GPU and CPU follows from the device memory, at the first SCF')
+      call acc_path_say('', 'MOZYME on GPU '//trim(gpu_desc))
     end if
 #else
-    if (.false.) write (path_last, '(2a)') trim(keywrd), mozyme   ! no GPU code in this build
+    if (.false.) write (path_said, '(2a)') trim(keywrd), mozyme   ! no GPU code in this build
 #ifdef MOPAC_MAGMA
-    call acc_path_say('CPU, except dense eigensolves on the GPU (MAGMA) where they fit')
+    call acc_path_say('GPU/CPU hybrid', 'SCF on CPU; dense eigensolves on GPU (MAGMA) where they fit')
 #else
-    call acc_path_say('CPU (built without GPU support)')
+    call acc_path_say('CPU', 'everything on CPU (built without GPU support)')
 #endif
 #endif
   end subroutine acc_path_start
@@ -580,45 +595,49 @@ contains
 
   subroutine acc_path_update(why)
 ! Reports the current split between GPU and CPU from the plan's flags (allow_*), the paths turned
-! off by MOPAC_ACC_*=0, the notes, and why (the reason for a change), if it differs from the last line.
+! off by MOPAC_ACC_*=0, the notes, and why (the reason for a change), unless already reported in this job.
     character(len=*), intent(in) :: why
-    character(len=400) :: cpu, text
+    character(len=400) :: cpu
+    character(len=40) :: mode
     logical :: any_gpu
     cpu = ''
-    if (.not. path_want_f) call add('Fock build (MOPAC_ACC_FOCK=0)')
-    if (.not. path_want_d) call add('density (MOPAC_ACC_DENS=0)')
-    if (.not. path_want_g) call add('DIAGG1 (MOPAC_ACC_DIAGG=0)')
+    if (.not. path_want_f) call add('Fock build on CPU (MOPAC_ACC_FOCK=0)')
+    if (.not. path_want_d) call add('density on CPU (MOPAC_ACC_DENS=0)')
+    if (.not. path_want_g) call add('DIAGG1 on CPU (MOPAC_ACC_DIAGG=0)')
     if (path_want_f .and. .not. allow_fock) then
-      call add('Fock build')
+      call add('Fock build on CPU')
     else if (allow_fock .and. path_nsd > 0 .and. .not. allow_sdgpu) then
-      call add('NDDO pairs with d orbitals in the Fock build')
+      call add('NDDO pairs with d orbitals on CPU')
     else if (allow_fock .and. path_ndd > 0 .and. .not. allow_ddgpu) then
-      if (dd_pending) then
-        call add('d,d NDDO pairs in the Fock build (moved to the GPU after the first Fock builds if that pays)')
+      if (path_dd_timed) then   ! before and after the timing: the reader saw the rule; TIMES/DEBUG show the numbers
+        call add('d,d NDDO pairs on CPU (moved to GPU after first Fock builds if faster)')
       else
-        call add('d,d NDDO pairs in the Fock build')
+        call add('d,d NDDO pairs on CPU')
       end if
     end if
-    if (path_want_d .and. .not. allow_dens) call add('density')
-    if (path_want_g .and. .not. allow_diagg) call add('DIAGG1')
+    if (path_want_d .and. .not. allow_dens) call add('density on CPU')
+    if (path_want_g .and. .not. allow_diagg) call add('DIAGG1 on CPU')
     if (len_trim(path_notes) > 0) call add(trim(path_notes))
     any_gpu = allow_fock .or. allow_dens .or. allow_diagg
+    if (.not. any_gpu) cpu = 'MOZYME on CPU'
+    if (len_trim(path_mem) > 0) cpu = trim(cpu)//' ('//trim(path_mem)//')'
+    if (len_trim(why) > 0) cpu = trim(cpu)//' ('//trim(why)//')'
     if (.not. any_gpu) then
-      text = 'CPU'
-      if (len_trim(path_mem) > 0) text = 'CPU ('//trim(path_mem)//')'
-    else if (len_trim(cpu) == 0) then
-      text = 'full GPU (every MOZYME step with GPU code: Fock build, density, DIAGG1, energy)'
+      mode = 'CPU'
+    else if (allow_fock .and. allow_dens .and. allow_diagg .and. (allow_ddgpu .or. path_ndd == 0) .and. &
+      (allow_sdgpu .or. path_nsd == 0) .and. path_want_f .and. path_want_d .and. path_want_g .and. &
+      len_trim(path_notes) == 0) then
+      mode = 'GPU'
+      if (path_dd_moved) cpu = 'd,d NDDO pairs on GPU (moved after first Fock builds)'
     else
-      text = 'GPU/CPU hybrid; on the CPU: '//trim(cpu)
-      if (len_trim(path_mem) > 0) text = trim(text)//' ('//trim(path_mem)//')'
+      mode = 'GPU/CPU hybrid'
     end if
-    if (len_trim(why) > 0) text = trim(text)//' - '//why
-    call acc_path_say(text)
+    call acc_path_say(mode, cpu)
   contains
     subroutine add(item)
       character(len=*), intent(in) :: item
       if (len_trim(cpu) > 0) then
-        cpu = trim(cpu)//', '//item
+        cpu = trim(cpu)//'; '//item
       else
         cpu = item
       end if
@@ -822,6 +841,7 @@ contains
         dble(max(0_8, avail - headroom))/gb, ' GB available'
     end if
     dd_pending = k == 2 .and. k0 == 2 .and. npair_dd > 0 .and. allow_sdgpu
+    path_dd_timed = dd_pending
     t_dd_cpu = -1.d0
     t_sd_gpu = -1.d0
     t_iter = -1.d0
@@ -883,7 +903,6 @@ contains
     double precision :: est, saving
     integer(8) :: free, need
     logical :: rep
-    character(len=200) :: msg
     if (t_dd_cpu < 0.d0 .or. t_iter <= 0.d0) return        ! not measured yet
     if (nsd > 0 .and. t_sd_gpu < 0.d0) return
     dd_pending = .false.
@@ -897,21 +916,16 @@ contains
       ' s per Fock build, GPU (estimated) ', est, ' s, SCF iteration ', t_iter, ' s'
     if (saving <= f_dd*t_iter) then
       if (rep) write (iw, '(a)') '; stay on the CPU (saving under 5 % of an iteration)'
-      write (msg, '(a,f0.4,a,f0.4,a)') 'kept there: ', t_dd_cpu, &
-        ' s per Fock build on the CPU, under 5 % of an SCF iteration (', t_iter, ' s)'
     else if (free - need < plan_headroom) then
       if (rep) write (iw, '(a,f6.2,a,f6.2,a)') '; would pay, but the kernel reservation (', dble(need)/1024.d0**3, &
         ' GB) does not fit (free ', dble(free)/1024.d0**3, ' GB): stay on the CPU'
-      write (msg, '(a,f0.2,a,f0.2,a)') 'kept there: their GPU kernel needs ', dble(need)/1024.d0**3, &
-        ' GB of device memory, ', dble(free)/1024.d0**3, ' GB free'
     else
       allow_ddgpu = .true.
+      path_dd_moved = .true.
       if (rep) write (iw, '(a,f6.2,a)') '; moved to the GPU (reservation ', dble(need)/1024.d0**3, ' GB)'
-      write (msg, '(a,f0.4,a,f0.4,a)') 'from the next Fock build; d,d NDDO pairs moved to the GPU (CPU ', t_dd_cpu, &
-        ' s per Fock build, GPU estimated ', est, ' s)'
     end if
     if (rep) flush (iw)
-    call acc_path_update(trim(msg))
+    call acc_path_update('')   ! reports a move to the GPU; a decision to stay adds nothing (TIMES/DEBUG show it)
   end subroutine acc_dd_decide
 
   subroutine acc_lmem_begin(predicted, free0)
@@ -1306,7 +1320,7 @@ subroutine acc_fz2n(f, ptot, qe, iorbs, nat, coord, resident, p_on_device, prepa
       dtmp(dpj(kd)) = dtmp(dpj(kd)) + 1
     end do
     deallocate (dtmp)
-    if (unsupported) call acc_path_note('Fock build (NDDO pairs of a kind the GPU code does not handle)')
+    if (unsupported) call acc_path_note('Fock build on CPU (NDDO pairs of a kind the GPU code does not handle)')
     !$acc enter data copyin(ta, tb, tstart, tlist, spos, sord, dpi, dpj, dcls, isd, idd, dstart, dlist) create(part, cdi, cdj)
     n_sdpairs = nsd
     n_ddpairs = ndd
