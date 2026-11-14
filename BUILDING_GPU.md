@@ -11,7 +11,7 @@ and is unaffected by any of the options below.
 | NVIDIA HPC SDK (`nvfortran`, `nvc`) | 26.9 (bundled CUDA 13.3) | Required for `GPU_OPENACC=ON`. Free download from NVIDIA. |
 | NVIDIA driver | 595.84 – 595.99 | CUDA 13 needs an R580 or newer driver. |
 | CMake | 3.28 | 3.20 or newer (CMake must identify the compiler as `NVHPC`). |
-| BLAS/LAPACK | OpenBLAS 0.3.34 (OpenMP) | Any BLAS/LAPACK works; give it with `MOPAC_LINK` (below). |
+| BLAS/LAPACK | HPC SDK `libblas_lp64`/`liblapack_lp64` | Chosen automatically with nvfortran (below); no flag needed. |
 | Python 3 + NumPy | 3.12 / 2.4 | Only for the test suite (`-DTESTS=ON`). |
 | gfortran (CPU-only builds) | 13.3 | Unchanged from upstream. |
 
@@ -28,8 +28,7 @@ mkdir build && cd build
 FC=nvfortran CC=nvc cmake .. \
     -DGPU_OPENACC=ON \
     -DGPU_OPENACC_ARCH="86;120" \
-    -DCMAKE_BUILD_TYPE=None -DCMAKE_Fortran_FLAGS="-O2" \
-    -DMOPAC_LINK="/path/to/libopenblas.so.0 -Wl,-rpath,/path/to"
+    -DCMAKE_BUILD_TYPE=None -DCMAKE_Fortran_FLAGS="-O2"
 make -j 16
 ```
 
@@ -54,8 +53,15 @@ Notes on the options:
   Only `86` and `120` have been tested.
 - **Optimization level.** The validated configuration is `CMAKE_BUILD_TYPE=None` with `-O2`.
   `CMAKE_BUILD_TYPE=Release` gives nvfortran `-fast -O3`, which has not been validated for this code.
-- **`MOPAC_LINK`.** Give the BLAS/LAPACK library as a full path. nvfortran's linker driver rewrites the
-  GNU form `-l:libopenblas.so.0` into `-llibopenblas.so.0`, which fails.
+- **BLAS/LAPACK and OpenMP.** With nvfortran, CMake links the HPC SDK's own BLAS and LAPACK
+  (`libblas_lp64`, `liblapack_lp64`), which are threaded with the same OpenMP runtime as MOPAC (`libnvomp`).
+  The program then has one OpenMP runtime, and `THREADS=n` bounds the threads of MOPAC and BLAS alike. A
+  system OpenBLAS adds its own pool: Ubuntu's pthread OpenBLAS ran 24 threads under `THREADS=8` on a
+  24-core machine in a conventional SCF, and an OpenMP OpenBLAS adds GNU's `libgomp` beside `libnvomp`.
+  `ldd` on the program should list `libnvomp` and neither `libgomp` nor `libopenblas`. To use another
+  BLAS anyway, set `-DBLA_VENDOR=<vendor>` (CMake's FindBLAS names) or `-DAUTO_BLAS=OFF` with `MOPAC_LINK`,
+  giving the library as a full path (nvfortran's linker driver rewrites the GNU form `-l:libopenblas.so.0`
+  into `-llibopenblas.so.0`, which fails).
 - **Rebuilding.** If a rebuild stops with `ld: input file 'libmopac.so.2' is the same as output file`,
   delete `libmopac.so.2` from the build directory and run `make` again.
 
@@ -77,9 +83,9 @@ basis functions. MAGMA is not part of the v1.0 test matrix.
 - **NVIDIA driver** (R580 or newer). The program loads the driver's `libcuda` at run time and links no CUDA
   toolkit library; it has, however, only been tested on machines that also had a CUDA toolkit installed.
 - **HPC SDK runtime libraries.** The program links `libacchost`, `libaccdevice`, `libaccdevaux`, `libnvf`,
-  `libnvomp`, `libnvc`, `libnvcpumath` and `libnvhpcatm`. On machines without the HPC SDK, ship them with the
-  program; the SDK provides the redistributable set in `Linux_x86_64/<version>/REDIST/compilers/lib`. Point
-  `LD_LIBRARY_PATH` (or an rpath) at them, together with the BLAS/LAPACK library.
+  `libnvomp`, `libnvc`, `libnvcpumath`, `libnvhpcatm`, `libblas_lp64` and `liblapack_lp64`. On machines
+  without the HPC SDK, ship them with the program; the SDK provides the redistributable set in
+  `Linux_x86_64/<version>/REDIST/compilers/lib`. Point `LD_LIBRARY_PATH` (or an rpath) at them.
 - **`FORTRANOPT=crlf`** in the environment if input files may have Windows (CRLF) line endings. Without it, the
   nvfortran runtime does not read such files (the MOPAC test `erratic-3` uses one).
 

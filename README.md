@@ -56,7 +56,7 @@ The GPU code is written in OpenACC and needs the NVIDIA HPC SDK compiler (`nvfor
 tested versions, run-time libraries and testing: [BUILDING_GPU.md](BUILDING_GPU.md). In short:
 ```
 FC=nvfortran CC=nvc cmake .. -DGPU_OPENACC=ON -DGPU_OPENACC_ARCH="86;120" \
-    -DCMAKE_BUILD_TYPE=None -DCMAKE_Fortran_FLAGS="-O2" -DMOPAC_LINK="/path/to/libopenblas.so.0"
+    -DCMAKE_BUILD_TYPE=None -DCMAKE_Fortran_FLAGS="-O2"
 make
 ```
 `GPU_OPENACC_ARCH` lists the compute capabilities to build device code for (`86` covers sm_86 to sm_89, e.g. RTX 30/40-series

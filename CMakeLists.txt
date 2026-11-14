@@ -195,6 +195,20 @@ endif()
 
 # Try to use CMake's system of finding BLAS & LAPACK libraries
 option(AUTO_BLAS "Use find_package to detect BLAS & LAPACK libraries" ON)
+# nvfortran (NVHPC): default to the HPC SDK's own BLAS & LAPACK, which are threaded with the same OpenMP
+# runtime (libnvomp) as MOPAC, so one OpenMP runtime serves the THREADS keyword and BLAS. A system BLAS
+# (OpenBLAS with pthreads or with GNU OpenMP) would add a second threading runtime. FindBLAS's NVHPC
+# vendor searches for "blas" on the default library path, where a system libblas is found first, so the
+# compiler's own library directory is searched first. Override with -DBLA_VENDOR=<vendor> or MOPAC_LINK.
+if(AUTO_BLAS AND CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC" AND NOT DEFINED BLA_VENDOR)
+  set(BLA_VENDOR NVHPC)
+endif()
+if(AUTO_BLAS AND BLA_VENDOR STREQUAL "NVHPC")
+  get_filename_component(_nvhpc_bin "${CMAKE_Fortran_COMPILER}" REALPATH)
+  get_filename_component(_nvhpc_lib "${_nvhpc_bin}/../../lib" ABSOLUTE)
+  list(PREPEND CMAKE_LIBRARY_PATH "${_nvhpc_lib}")
+  message(STATUS "BLAS/LAPACK: NVIDIA HPC SDK (${_nvhpc_lib})")
+endif()
 if(AUTO_BLAS)
   find_package(BLAS)
   find_package(LAPACK)
