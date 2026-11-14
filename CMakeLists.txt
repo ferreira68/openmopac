@@ -195,6 +195,28 @@ endif()
 
 # Try to use CMake's system of finding BLAS & LAPACK libraries
 option(AUTO_BLAS "Use find_package to detect BLAS & LAPACK libraries" ON)
+# nvfortran (NVHPC): default to the HPC SDK's own BLAS & LAPACK, which are threaded with the same OpenMP
+# runtime (libnvomp) as MOPAC, so one OpenMP runtime serves the THREADS keyword and BLAS. A system BLAS
+# (OpenBLAS with pthreads or with GNU OpenMP) would add a second threading runtime. FindBLAS's NVHPC
+# vendor searches for "blas" on the default library path, where a system libblas is found first, so the
+# compiler's own library directory is searched first. Override with -DBLA_VENDOR=<vendor> or MOPAC_LINK.
+if(AUTO_BLAS AND CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC" AND NOT DEFINED BLA_VENDOR)
+  set(BLA_VENDOR NVHPC)
+endif()
+if(AUTO_BLAS AND BLA_VENDOR STREQUAL "NVHPC")
+  get_filename_component(_nvhpc_bin "${CMAKE_Fortran_COMPILER}" REALPATH)
+  get_filename_component(_nvhpc_lib "${_nvhpc_bin}/../../lib" ABSOLUTE)
+  set(CMAKE_LIBRARY_PATH "${_nvhpc_lib}" ${CMAKE_LIBRARY_PATH})   # prepend (list(PREPEND) needs CMake 3.15)
+  # A build directory configured before this default holds the system BLAS/LAPACK in its cache; FindBLAS
+  # and FindLAPACK would reuse it. Drop cached BLAS/LAPACK results that point outside the SDK.
+  get_cmake_property(_cache_vars CACHE_VARIABLES)
+  foreach(_v IN LISTS _cache_vars)
+    if(_v MATCHES "^(BLAS|LAPACK)_.*_LIBRARY$" AND NOT "${${_v}}" MATCHES "^${_nvhpc_lib}/")
+      unset(${_v} CACHE)
+    endif()
+  endforeach()
+  message(STATUS "BLAS/LAPACK: NVIDIA HPC SDK (${_nvhpc_lib})")
+endif()
 if(AUTO_BLAS)
   find_package(BLAS)
   find_package(LAPACK)
